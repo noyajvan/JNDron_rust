@@ -10,7 +10,7 @@
 //! * the documented CRC_EXTRA table (see `mavlink::schema`),
 //! * "never panics, never grows without bound" on hostile input.
 
-use flight_core::mavlink::{crc16_x25, encode_v1, encode_v2, Parser};
+use flight_core::mavlink::{crc16_x25, encode_v2, Parser};
 use flight_core::messages::{defs, Heartbeat, Message};
 
 // ---------------------------------------------------------------------------
@@ -263,7 +263,10 @@ fn a_valid_frame_after_corruption_is_still_delivered() {
 }
 
 #[test]
-fn v1_frames_are_parsed_and_can_be_re_emitted_as_v1() {
+fn mavlink1_frames_are_treated_as_noise() {
+    // This bridge speaks MAVLink 2 only. A MAVLink 1 frame must be skipped
+    // entirely - and, critically, must not stop the parser from finding the
+    // MAVLink 2 frame that follows it.
     let hb = Heartbeat {
         custom_mode: 1,
         typ: 2,
@@ -273,31 +276,17 @@ fn v1_frames_are_parsed_and_can_be_re_emitted_as_v1() {
         mavlink_version: 3,
     };
     let payload = hb.payload();
-    let bytes = encode_v1(
-        9,
-        1,
-        1,
-        defs::HEARTBEAT.id,
-        &payload,
-        defs::HEARTBEAT.crc_extra(),
-    );
+    let mut v1 = vec![0xFE, payload.len() as u8, 9, 1, 1, defs::HEARTBEAT.id as u8];
+    v1.extend_from_slice(&payload);
+    v1.extend_from_slice(&[0xAA, 0x55]); // the checksum is never consulted
 
-    let frames = parse_all(&bytes);
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].version, 1);
+    let frames = parse_all(&v1);
+    assert!(frames.is_empty(), "MAVLink 1 must not be decoded");
+
+    let mut stream = v1.clone();
+    stream.extend_from_slice(&heartbeat_frame());
+    let frames = parse_all(&stream);
+    assert_eq!(frames.len(), 1, "the MAVLink 2 frame must still be found");
+    assert_eq!(frames[0].msgid, defs::HEARTBEAT.id);
     assert!(frames[0].crc_checked);
-
-    // Re-emitting as MAVLink 1 and re-parsing must be stable.
-    let again = encode_v1(
-        frames[0].seq,
-        frames[0].sysid,
-        frames[0].compid,
-        frames[0].msgid,
-        &frames[0].payload,
-        defs::HEARTBEAT.crc_extra(),
-    );
-    let round = parse_all(&again);
-    assert_eq!(round.len(), 1);
-    assert_eq!(round[0].version, 1);
-    assert_eq!(round[0].payload, payload);
 }

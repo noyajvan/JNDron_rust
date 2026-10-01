@@ -1,17 +1,20 @@
-//! MAVLink v1/v2 framing: little-endian payload writer/reader, frame encoder
+//! MAVLink **2** framing: little-endian payload writer/reader, frame encoder
 //! and an incremental streaming parser.
+//!
+//! Only MAVLink 2 is supported: ArduPilot speaks MAVLink 2 as soon as it sees a
+//! MAVLink 2 peer (which this bridge is), Mission Planner is MAVLink 2, and
+//! MAVLink 1 would cap message ids at 8 bits and cannot carry extensions. Any
+//! `0xFE` (MAVLink 1 start marker) in the stream is therefore treated as noise.
 
 use super::crc::crc16_x25;
 use super::schema::MsgDef;
 
-pub const STX_V1: u8 = 0xFE;
+/// MAVLink 2 start-of-frame marker. MAVLink 1 (`0xFE`) is *not* accepted.
 pub const STX_V2: u8 = 0xFD;
 
-/// A decoded MAVLink frame.
+/// A decoded MAVLink 2 frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
-    /// Protocol version: 1 or 2.
-    pub version: u8,
     pub seq: u8,
     pub sysid: u8,
     pub compid: u8,
@@ -200,29 +203,6 @@ pub fn encode_v2(
     out
 }
 
-/// Encode a MAVLink 1 frame (message ids must fit in 8 bits).
-pub fn encode_v1(
-    seq: u8,
-    sysid: u8,
-    compid: u8,
-    msgid: u32,
-    payload: &[u8],
-    crc_extra: u8,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + payload.len());
-    out.push(STX_V1);
-    out.push(payload.len() as u8);
-    out.push(seq);
-    out.push(sysid);
-    out.push(compid);
-    out.push(msgid as u8);
-    out.extend_from_slice(payload);
-    let crc = crc16_x25(&out[1..]);
-    let crc = crc16_x25_continue(crc, &[crc_extra]);
-    out.extend_from_slice(&crc.to_le_bytes());
-    out
-}
-
 /// Continue a CRC-16/X.25 over more bytes.
 fn crc16_x25_continue(seed: u16, data: &[u8]) -> u16 {
     // Re-implemented by prefixing: x25 is streaming, so we rebuild the state.
@@ -261,8 +241,8 @@ impl Parser {
 
     /// Bytes currently held while waiting for the rest of a frame.
     ///
-    /// Bounded by `10 + 255 + 2` for MAVLink 2, because a candidate frame is
-    /// parsed (and then dropped on checksum failure) as soon as it is complete.
+    /// Bounded by `10 + 255 + 2`, because a candidate frame is parsed (and
+    /// then dropped on checksum failure) as soon as it is complete.
     pub fn buffered_len(&self) -> usize {
         self.buf.len()
     }
@@ -289,8 +269,9 @@ impl Parser {
 
     fn parse_one(&mut self) -> Option<Frame> {
         loop {
-            // Locate the start-of-frame marker, discarding leading noise.
-            let start = match self.buf.iter().position(|&b| b == STX_V1 || b == STX_V2) {
+            // Locate the MAVLink 2 start marker, discarding leading noise
+            // (including any MAVLink 1 frame, which this bridge does not speak).
+            let start = match self.buf.iter().position(|&b| b == STX_V2) {
                 Some(s) => s,
                 None => {
                     self.buf.clear();
@@ -301,38 +282,26 @@ impl Parser {
                 self.buf.drain(..start);
             }
 
-            let v2 = self.buf[0] == STX_V2;
-            let hdr = if v2 { 10 } else { 6 };
-            if self.buf.len() < hdr {
+            const HDR: usize = 10;
+            if self.buf.len() < HDR {
                 return None;
             }
             let len = self.buf[1] as usize;
-            let total = hdr + len + 2;
+            let total = HDR + len + 2;
             if self.buf.len() < total {
                 return None;
             }
 
-            let hdr_bytes: Vec<u8> = self.buf[..hdr].to_vec();
-            let payload: Vec<u8> = self.buf[hdr..hdr + len].to_vec();
+            let hdr_bytes: Vec<u8> = self.buf[..HDR].to_vec();
+            let payload: Vec<u8> = self.buf[HDR..HDR + len].to_vec();
             let rx_crc = u16::from_le_bytes([self.buf[total - 2], self.buf[total - 1]]);
 
-            let (seq, sysid, compid, msgid) = if v2 {
-                (
-                    hdr_bytes[4],
-                    hdr_bytes[5],
-                    hdr_bytes[6],
-                    (hdr_bytes[7] as u32)
-                        | ((hdr_bytes[8] as u32) << 8)
-                        | ((hdr_bytes[9] as u32) << 16),
-                )
-            } else {
-                (
-                    hdr_bytes[2],
-                    hdr_bytes[3],
-                    hdr_bytes[4],
-                    hdr_bytes[5] as u32,
-                )
-            };
+            let seq = hdr_bytes[4];
+            let sysid = hdr_bytes[5];
+            let compid = hdr_bytes[6];
+            let msgid = (hdr_bytes[7] as u32)
+                | ((hdr_bytes[8] as u32) << 8)
+                | ((hdr_bytes[9] as u32) << 16);
 
             let def = crate::messages::defs::find(msgid);
             let crc_checked = match def {
@@ -352,7 +321,6 @@ impl Parser {
             self.buf.drain(..total);
             self.frames_ok += 1;
             return Some(Frame {
-                version: if v2 { 2 } else { 1 },
                 seq,
                 sysid,
                 compid,
@@ -390,7 +358,6 @@ mod tests {
         }
         assert_eq!(frames.len(), 1);
         let f = &frames[0];
-        assert_eq!(f.version, 2);
         assert_eq!(f.seq, 7);
         assert_eq!(f.sysid, 1);
         assert_eq!(f.compid, 191);

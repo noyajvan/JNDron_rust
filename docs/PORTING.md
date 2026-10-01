@@ -30,9 +30,8 @@ records the behavioural decisions taken during the port.
 3. **MAVLink 2 truncation.** `encode_v2` strips trailing zero bytes before
    computing the checksum, like `mavlink_msg_to_send_buffer`.
 4. **Forwarding preserves the original header.** Telemetry re-emitted towards
-   the GCS keeps the FC's `sysid`/`compid`/`seq`, **and its protocol version**:
-   MAVLink 1 frames stay MAVLink 1 when the `CRC_EXTRA` is known, matching
-   `mavlink_msg_to_send_buffer`'s behaviour (`msg.magic`).
+   the GCS keeps the FC's `sysid`/`compid`/`seq`. The output is always
+   MAVLink 2.
 5. **Unknown message ids.** The core forwards frames whose `CRC_EXTRA` it does
    not know without verifying them; known ids are always verified and dropped
    on mismatch.
@@ -55,6 +54,11 @@ records the behavioural decisions taken during the port.
   code could not have two).
 * **`STATE_ARMED` (9)** exists in the enum for parity but, as in the original,
   the state machine never enters it.
+* **MAVLink 2 only.** MAVLink 1 support was dropped deliberately: message ids
+  fit in 8 bits there, extensions do not exist, and both ArduPilot (once it
+  sees a MAVLink 2 peer, which this bridge is) and Mission Planner speak
+  MAVLink 2. A `0xFE` byte is treated as stream noise, so a MAVLink 1 frame is
+  skipped rather than converted. `encode_v1` and `Frame::version` are gone.
 * **Dead globals dropped.** `arm_cmd_sent`, `mode_cmd_sent`, `last_arm_retry_ms`,
   `last_mode_retry_ms` and `last_reason_report_ms` were declared and (some)
   assigned in the C++ but never read; they are gone, along with the unreachable
@@ -76,7 +80,7 @@ records the behavioural decisions taken during the port.
 | Crash detection | Six scenarios including "fell then flew again". |
 | LED | Blink/breathe tables, calibration breathing speed-up. |
 | FSM | Boot → MAG_OK, rotation → calibration → success, bad-DIA retry, mode guard stop, landing relay, crash relay. |
-| Transport | TCP forwarding, UDP double-send, MAVLink 1 passthrough, GCS→FC, calibration-spam suppression. |
+| Transport | TCP forwarding, UDP double-send, MAVLink 1 rejection, GCS→FC, calibration-spam suppression. |
 | Console | Every command, persistence, restart, junk input. |
 
 Run with:

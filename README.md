@@ -56,7 +56,8 @@ and the behavioural notes.
 
 ## What `flight-core` contains
 
-* **`mavlink`** - a dependency-free MAVLink 1/2 implementation:
+* **`mavlink`** - a dependency-free MAVLink **2** implementation (MAVLink 1 is
+  not spoken; `0xFE` bytes are treated as noise):
   * CRC-16/X.25 (the exact `mavgen` nibble algorithm, *without* the final
     XOR-0xFFFF),
   * message schemas and `CRC_EXTRA` **computed from the field layouts** rather
@@ -92,8 +93,8 @@ and the behavioural notes.
   messages are still forwarded, just without CRC verification (their CRC_EXTRA
   is unknown). The original included the full `ardupilotmega` dialect and could
   verify everything.
-* Relayed frames keep their original protocol version: a MAVLink 1 frame is
-  re-emitted as MAVLink 1 (the original did the same via `msg.magic`).
+* Relayed frames are always re-emitted as MAVLink 2, keeping the FC's
+  `sysid`/`compid`/`seq`. MAVLink 1 input is ignored, not converted.
 * The console is polled character-by-character (`terminal_char`), matching the
   original `Serial` loop.
 * `esp-idf-svc`/`esp-idf-hal` versions are pinned to the ESP-IDF 5.1 era to

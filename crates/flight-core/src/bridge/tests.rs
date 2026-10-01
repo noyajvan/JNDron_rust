@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::io::MockIo;
-use crate::mavlink::{encode_v1, encode_v2, Writer};
+use crate::mavlink::{encode_v2, Writer};
 use crate::messages::defs;
 
 // ---------------------------------------------------------------------------
@@ -235,21 +235,27 @@ fn gcs_bytes_are_forwarded_to_fc_and_mark_server() {
 }
 
 #[test]
-fn mavlink1_frames_are_relayed_as_mavlink1() {
+fn mavlink1_frames_are_ignored_by_the_v2_only_parser() {
     let (mut b, mut io) = booted();
     io.take_net();
-    let frame = encode_v1(
-        3,
-        1,
-        1,
-        messages::id::HEARTBEAT,
-        &hb_payload(MODE_STABILIZE, false),
-        defs::HEARTBEAT.crc_extra(),
+
+    // A MAVLink 1 HEARTBEAT frame: 0xFE magic, 6-byte header, 9-byte payload.
+    let mut v1 = vec![0xFE, 9, 3, 1, 1, messages::id::HEARTBEAT as u8];
+    v1.extend_from_slice(&hb_payload(MODE_STABILIZE, false));
+    v1.extend_from_slice(&[0u8, 0u8]); // bogus checksum; never even looked at
+
+    b.feed_fc_bytes(&mut io, &v1);
+    assert!(io.take_net().is_empty(), "MAVLink 1 must not be relayed");
+    assert_eq!(b.fc_msgs, 0, "MAVLink 1 must not be decoded");
+
+    // A following MAVLink 2 frame is still picked up.
+    b.feed_fc_bytes(
+        &mut io,
+        &frame(messages::id::HEARTBEAT, &hb_payload(MODE_STABILIZE, false)),
     );
-    b.feed_fc_bytes(&mut io, &frame);
+    assert_eq!(b.fc_msgs, 1);
     let net = io.take_net();
-    assert!(!net.is_empty(), "v1 telemetry must be relayed");
-    assert_eq!(net[0], 0xFE, "the MAVLink 1 start marker must be preserved");
+    assert_eq!(net[0], 0xFD, "telemetry is always relayed as MAVLink 2");
 }
 
 #[test]

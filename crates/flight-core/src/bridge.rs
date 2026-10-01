@@ -570,9 +570,9 @@ impl Bridge {
         for frame in frames {
             self.fc_msgs = self.fc_msgs.wrapping_add(1);
             let def = defs::find(frame.msgid);
-            // Re-emit with the *original* header (sysid/compid/seq) and the
-            // original protocol version, like `mavlink_msg_to_send_buffer`.
-            let bytes = forward_bytes(&frame, def);
+            // Re-emit as MAVLink 2, keeping the FC's sysid/compid/seq and the
+            // message's own payload, like `mavlink_msg_to_send_buffer`.
+            let bytes = frame.encode_v2(frame.seq, def);
             let msg = Message::decode(frame.msgid, &frame.payload);
             let spam = msg.is_calibration_spam();
             if !spam {
@@ -1370,25 +1370,6 @@ impl Bridge {
             }
             self.enter_state(io, State::RelayControl);
         }
-    }
-}
-
-/// Re-encode a received frame for relaying, preserving its MAVLink version.
-///
-/// MAVLink 1 frames can only be re-emitted when we know the message's
-/// `CRC_EXTRA`; otherwise we fall back to MAVLink 2 (which every modern GCS
-/// understands).
-fn forward_bytes(frame: &Frame, def: Option<&mavlink::MsgDef>) -> Vec<u8> {
-    match def {
-        Some(d) if frame.version == 1 && frame.msgid < 256 => mavlink::encode_v1(
-            frame.seq,
-            frame.sysid,
-            frame.compid,
-            frame.msgid,
-            &frame.payload,
-            d.crc_extra(),
-        ),
-        _ => frame.encode_v2(frame.seq, def),
     }
 }
 

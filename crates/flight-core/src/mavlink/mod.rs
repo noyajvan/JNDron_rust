@@ -12,5 +12,5 @@ pub mod frame;
 pub mod schema;
 
 pub use crc::crc16_x25;
-pub use frame::{encode_v1, encode_v2, Frame, Parser, Reader, Writer};
+pub use frame::{encode_v2, Frame, Parser, Reader, Writer};
 pub use schema::{Field, MsgDef, Ty};
