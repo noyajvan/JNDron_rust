@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# The ESP32 firmware crate is intentionally NOT a workspace member: it targets
+# `xtensa-esp32s3-espidf` and pulls in `esp-idf-svc`, which cannot be resolved
+# or built on a host toolchain. Keeping it out means `cargo test` at the root
+# only touches the portable, host-testable `flight-core` crate.
+exclude = ["firmware"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

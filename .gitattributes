@@ -1,0 +1,13 @@
+# Normalise line endings: keep LF in the repository for everything text.
+* text=auto eol=lf
+
+# Windows batch/shell helpers keep their native endings if added later.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh  text eol=lf
+
+# Binaries (none yet, but be explicit).
+*.bin binary
+*.elf binary
+*.png binary
+*.webp binary

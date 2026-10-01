@@ -1,0 +1,15 @@
+[package]
+name = "flight-core"
+description = "Portable, host-testable flight logic for the JNDron MAVLink bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Deliberately dependency-free: the whole MAVLink codec is implemented in-tree
+# so that nothing large has to be downloaded or stored on disk.
+[dependencies]
+
+[lib]
+name = "flight_core"
+path = "src/lib.rs"

@@ -1,0 +1,22 @@
+# Rust / Cargo
+/target
+**/target
+Cargo.lock.bak
+*.rs.bk
+
+# ESP-IDF build artefacts (very large - never commit)
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/build/
+firmware/.embuild/
+firmware/partitions.bin
+firmware/bootloader.bin
+firmware/*.elf
+firmware/*.bin
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

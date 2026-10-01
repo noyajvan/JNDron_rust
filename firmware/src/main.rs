@@ -1,0 +1,67 @@
+//! JNDron firmware entry point.
+//!
+//! This is the Rust equivalent of `firmware/src/main_DrnBrdg.cpp`: a very
+//! small `setup()` + `loop()` that owns a [`Platform`] (the hardware layer)
+//! and a [`flight_core::Bridge`] (the tested protocol/state logic).
+//!
+//! ```text
+//!   ESP32-S3 ──UART0──▶ flight controller (ArduPilot)
+//!        │
+//!        ├── Wi-Fi STA ──▶ phone hotspot ──▶ 4G ──▶ VPS ──▶ Mission Planner
+//!        └── USB Serial/JTAG console (STATUS / SSID= / PASS= / ...)
+//! ```
+
+mod consts;
+mod platform;
+
+use std::net::SocketAddr;
+
+use esp_idf_hal::delay::FreeRtos;
+use esp_idf_hal::peripherals::Peripherals;
+use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
+
+use flight_core::{Bridge, Config};
+use platform::Platform;
+
+fn main() -> anyhow::Result<()> {
+    // Patch the ESP-IDF `std` shims (required before any std I/O).
+    esp_idf_svc::sys::link_patches();
+    esp_idf_svc::log::EspLogger::initialize_default();
+
+    let peripherals = Peripherals::take()?;
+    let sys_loop = EspSystemEventLoop::take()?;
+    let nvs_partition = EspDefaultNvsPartition::take()?;
+
+    let mut platform = Platform::new(peripherals, sys_loop, nvs_partition, consts::GCS_IP)?;
+
+    // `loadConfig()`: NVS values, with the same defaults as the C++ firmware.
+    let mut cfg = Config::default();
+    cfg.apply_stored(platform.load_stored_config());
+
+    let mut bridge = Bridge::new(cfg);
+    bridge.boot(&mut platform);
+
+    log::info!(
+        "JNDron ready (gcs={})",
+        SocketAddr::from((consts::GCS_IP, consts::GCS_PORT_TCP))
+    );
+
+    loop {
+        // 1. USB console commands (handleTerminalConfig).
+        platform.pump_console(&mut bridge);
+        // 2. Keep the TCP relay link alive (tcpLinkService).
+        platform.service_tcp();
+        // 3. Mission Planner -> FC (bridgeWiFiToFC).
+        platform.pump_gcs(&mut bridge);
+        // 4. FC -> Mission Planner (bridgeFCtoWiFi).
+        platform.pump_fc(&mut bridge);
+        // 5. Heartbeats, FSM, timeout watchdogs (loop()).
+        bridge.tick(&mut platform);
+        // 6. Status LED (updateLED).
+        let led = bridge.led(platform.now_ms());
+        platform.set_led(led);
+
+        FreeRtos::delay_ms(1);
+    }
+}
