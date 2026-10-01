@@ -43,7 +43,7 @@ The interesting behaviour in a telemetry bridge is *protocol and state
 machine*, not GPIO. By routing every side effect through the `flight_core::io::Io`
 trait, the whole bridge can be exercised on a desktop:
 
-* 56 unit/integration tests run in ~10 ms (`cargo test`),
+* 65 unit/integration tests run in ~10 ms (`cargo test`),
 * `MockIo` records every byte written to the FC UART, the TCP relay and UDP,
 * the state machine can be driven through a full flight (boot → MAG_OK →
   calibration → ARM → AUTO → mission → LAND → relay) in milliseconds,

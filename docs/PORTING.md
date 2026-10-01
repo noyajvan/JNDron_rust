@@ -59,10 +59,13 @@ records the behavioural decisions taken during the port.
   sees a MAVLink 2 peer, which this bridge is) and Mission Planner speak
   MAVLink 2. A `0xFE` byte is treated as stream noise, so a MAVLink 1 frame is
   skipped rather than converted. `encode_v1` and `Frame::version` are gone.
-* **Dead globals dropped.** `arm_cmd_sent`, `mode_cmd_sent`, `last_arm_retry_ms`,
-  `last_mode_retry_ms` and `last_reason_report_ms` were declared and (some)
-  assigned in the C++ but never read; they are gone, along with the unreachable
-  `STATE_START_MISSION` arm.
+* **State machine untouched since the port.** `bridge.rs` differs from the
+  initial port commit **only in comments** - the FSM, the ARM/DISARM paths and
+  every timer are byte-for-byte the ported logic. Verify with
+  `git diff <port-commit> -- crates/flight-core/src/bridge.rs`. The C++ globals
+  `arm_cmd_sent` / `mode_cmd_sent` / `last_*_retry_ms` / `last_reason_report_ms`
+  are kept as parity placeholders even though nothing reads them, so the
+  mapping stays 1:1.
 * **No `unwrap`/`panic!` in library code.** The only `unwrap()` calls in the
   crate are inside `#[cfg(test)]` code.
 
@@ -80,6 +83,7 @@ records the behavioural decisions taken during the port.
 | Crash detection | Six scenarios including "fell then flew again". |
 | LED | Blink/breathe tables, calibration breathing speed-up. |
 | FSM | Boot → MAG_OK, rotation → calibration → success, bad-DIA retry, mode guard stop, landing relay, crash relay. |
+| **ARM/DISARM + FSM contract** | `tests/fsm_arm_disarm.rs` locks the arming rules: ARM is withheld until a 3D fix, retried every 5 s, never sent from ARMING; AUTO needs fix + EKF position; disarming in ARMING returns to NO_ARM silently; mission end always forces DISARM (`param2 = 21196`) and fires the relay **only** after a real flight; `mdfly = 60` freezes the FSM. |
 | Transport | TCP forwarding, UDP double-send, MAVLink 1 rejection, GCS→FC, calibration-spam suppression. |
 | Console | Every command, persistence, restart, junk input. |
 

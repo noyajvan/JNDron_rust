@@ -169,6 +169,10 @@ pub struct Bridge {
     pub last_wifi_hb: u32,
     pub last_serial_log: u32,
     pub state_entry_ms: u32,
+    /// Parity placeholders (never read) kept so the FSM matches the C++ 1:1.
+    pub last_arm_retry_ms: u32,
+    pub last_mode_retry_ms: u32,
+    pub last_reason_report_ms: u32,
     pub last_server_pkt_ms: u32,
 
     // --- queues / console ---
@@ -275,6 +279,9 @@ impl Bridge {
             last_wifi_hb: 0,
             last_serial_log: 0,
             state_entry_ms: 0,
+            last_arm_retry_ms: 0,
+            last_mode_retry_ms: 0,
+            last_reason_report_ms: 0,
             last_server_pkt_ms: 0,
 
             status_queue: TextRing::new(),
@@ -981,6 +988,12 @@ impl Bridge {
             }
             State::NoArm => {
                 self.no_arm_init = false;
+            }
+            // This bridge has no edge into StartMission, so this arm is
+            // unreachable - it is kept verbatim so the FSM matches the C++ 1:1.
+            State::StartMission => {
+                self.mode_cmd_sent = false;
+                self.last_mode_retry_ms = 0;
             }
             State::Mission => {
                 self.mission_start_msg = false;
