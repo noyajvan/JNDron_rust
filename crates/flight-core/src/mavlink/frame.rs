@@ -259,6 +259,18 @@ impl Parser {
         Parser::default()
     }
 
+    /// Bytes currently held while waiting for the rest of a frame.
+    ///
+    /// Bounded by `10 + 255 + 2` for MAVLink 2, because a candidate frame is
+    /// parsed (and then dropped on checksum failure) as soon as it is complete.
+    pub fn buffered_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// The largest buffer the parser can hold. Used by tests to prove the
+    /// parser cannot be made to grow without bound by hostile input.
+    pub const MAX_BUFFERED: usize = 10 + 255 + 2;
+
     /// Feed a single byte, returning a frame if one just completed.
     pub fn push(&mut self, b: u8) -> Option<Frame> {
         self.bytes_in = self.bytes_in.wrapping_add(1);

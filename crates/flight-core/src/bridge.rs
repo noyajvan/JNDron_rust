@@ -169,9 +169,6 @@ pub struct Bridge {
     pub last_wifi_hb: u32,
     pub last_serial_log: u32,
     pub state_entry_ms: u32,
-    pub last_arm_retry_ms: u32,
-    pub last_mode_retry_ms: u32,
-    pub last_reason_report_ms: u32,
     pub last_server_pkt_ms: u32,
 
     // --- queues / console ---
@@ -278,9 +275,6 @@ impl Bridge {
             last_wifi_hb: 0,
             last_serial_log: 0,
             state_entry_ms: 0,
-            last_arm_retry_ms: 0,
-            last_mode_retry_ms: 0,
-            last_reason_report_ms: 0,
             last_server_pkt_ms: 0,
 
             status_queue: TextRing::new(),
@@ -576,9 +570,9 @@ impl Bridge {
         for frame in frames {
             self.fc_msgs = self.fc_msgs.wrapping_add(1);
             let def = defs::find(frame.msgid);
-            // Re-emit with the *original* header (sysid/compid/seq), like
-            // `mavlink_msg_to_send_buffer(&mavMsg)` did.
-            let bytes = frame.encode_v2(frame.seq, def);
+            // Re-emit with the *original* header (sysid/compid/seq) and the
+            // original protocol version, like `mavlink_msg_to_send_buffer`.
+            let bytes = forward_bytes(&frame, def);
             let msg = Message::decode(frame.msgid, &frame.payload);
             let spam = msg.is_calibration_spam();
             if !spam {
@@ -988,10 +982,6 @@ impl Bridge {
             State::NoArm => {
                 self.no_arm_init = false;
             }
-            State::StartMission => {
-                self.mode_cmd_sent = false;
-                self.last_mode_retry_ms = 0;
-            }
             State::Mission => {
                 self.mission_start_msg = false;
                 self.flew_above_1m = false;
@@ -1380,6 +1370,25 @@ impl Bridge {
             }
             self.enter_state(io, State::RelayControl);
         }
+    }
+}
+
+/// Re-encode a received frame for relaying, preserving its MAVLink version.
+///
+/// MAVLink 1 frames can only be re-emitted when we know the message's
+/// `CRC_EXTRA`; otherwise we fall back to MAVLink 2 (which every modern GCS
+/// understands).
+fn forward_bytes(frame: &Frame, def: Option<&mavlink::MsgDef>) -> Vec<u8> {
+    match def {
+        Some(d) if frame.version == 1 && frame.msgid < 256 => mavlink::encode_v1(
+            frame.seq,
+            frame.sysid,
+            frame.compid,
+            frame.msgid,
+            &frame.payload,
+            d.crc_extra(),
+        ),
+        _ => frame.encode_v2(frame.seq, def),
     }
 }
 

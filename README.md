@@ -43,10 +43,13 @@ The interesting behaviour in a telemetry bridge is *protocol and state
 machine*, not GPIO. By routing every side effect through the `flight_core::io::Io`
 trait, the whole bridge can be exercised on a desktop:
 
-* 46 unit/integration tests run in ~10 ms,
+* 56 unit/integration tests run in ~10 ms (`cargo test`),
 * `MockIo` records every byte written to the FC UART, the TCP relay and UDP,
 * the state machine can be driven through a full flight (boot → MAG_OK →
-  calibration → ARM → AUTO → mission → LAND → relay) in milliseconds.
+  calibration → ARM → AUTO → mission → LAND → relay) in milliseconds,
+* `tests/reliability.rs` cross-checks the codec against an *independent*
+  bit-at-a-time CRC implementation, exhaustive single-bit corruption and
+  hostile input, rather than only round-tripping against itself.
 
 See [`docs/PORTING.md`](docs/PORTING.md) for the file-by-file C++ → Rust map
 and the behavioural notes.
@@ -89,6 +92,8 @@ and the behavioural notes.
   messages are still forwarded, just without CRC verification (their CRC_EXTRA
   is unknown). The original included the full `ardupilotmega` dialect and could
   verify everything.
+* Relayed frames keep their original protocol version: a MAVLink 1 frame is
+  re-emitted as MAVLink 1 (the original did the same via `msg.magic`).
 * The console is polled character-by-character (`terminal_char`), matching the
   original `Serial` loop.
 * `esp-idf-svc`/`esp-idf-hal` versions are pinned to the ESP-IDF 5.1 era to

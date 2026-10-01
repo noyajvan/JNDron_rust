@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::io::MockIo;
-use crate::mavlink::{encode_v2, Writer};
+use crate::mavlink::{encode_v1, encode_v2, Writer};
 use crate::messages::defs;
 
 // ---------------------------------------------------------------------------
@@ -232,6 +232,24 @@ fn gcs_bytes_are_forwarded_to_fc_and_mark_server() {
     b.feed_gcs_bytes(&mut io, &[0x01, 0x02, 0x03]);
     assert_eq!(io.take_fc(), vec![1, 2, 3]);
     assert!(b.has_server);
+}
+
+#[test]
+fn mavlink1_frames_are_relayed_as_mavlink1() {
+    let (mut b, mut io) = booted();
+    io.take_net();
+    let frame = encode_v1(
+        3,
+        1,
+        1,
+        messages::id::HEARTBEAT,
+        &hb_payload(MODE_STABILIZE, false),
+        defs::HEARTBEAT.crc_extra(),
+    );
+    b.feed_fc_bytes(&mut io, &frame);
+    let net = io.take_net();
+    assert!(!net.is_empty(), "v1 telemetry must be relayed");
+    assert_eq!(net[0], 0xFE, "the MAVLink 1 start marker must be preserved");
 }
 
 #[test]

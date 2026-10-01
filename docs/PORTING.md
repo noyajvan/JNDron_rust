@@ -30,12 +30,18 @@ records the behavioural decisions taken during the port.
 3. **MAVLink 2 truncation.** `encode_v2` strips trailing zero bytes before
    computing the checksum, like `mavlink_msg_to_send_buffer`.
 4. **Forwarding preserves the original header.** Telemetry re-emitted towards
-   the GCS keeps the FC's `sysid`/`compid`/`seq`.
+   the GCS keeps the FC's `sysid`/`compid`/`seq`, **and its protocol version**:
+   MAVLink 1 frames stay MAVLink 1 when the `CRC_EXTRA` is known, matching
+   `mavlink_msg_to_send_buffer`'s behaviour (`msg.magic`).
 5. **Unknown message ids.** The core forwards frames whose `CRC_EXTRA` it does
    not know without verifying them; known ids are always verified and dropped
    on mismatch.
 6. **Unsigned-time arithmetic.** All timers use `u32::wrapping_sub`, matching
    Arduino `millis()` overflow behaviour.
+7. **Buffer bound.** The frame parser can hold at most `10 + 255 + 2` bytes,
+   because a candidate frame is parsed (and dropped on checksum failure) as
+   soon as it is complete. `Parser::MAX_BUFFERED` documents this and
+   `random_garbage_never_panics_and_keeps_the_buffer_bounded` enforces it.
 
 ## Deliberate differences
 
@@ -49,17 +55,28 @@ records the behavioural decisions taken during the port.
   code could not have two).
 * **`STATE_ARMED` (9)** exists in the enum for parity but, as in the original,
   the state machine never enters it.
+* **Dead globals dropped.** `arm_cmd_sent`, `mode_cmd_sent`, `last_arm_retry_ms`,
+  `last_mode_retry_ms` and `last_reason_report_ms` were declared and (some)
+  assigned in the C++ but never read; they are gone, along with the unreachable
+  `STATE_START_MISSION` arm.
+* **No `unwrap`/`panic!` in library code.** The only `unwrap()` calls in the
+  crate are inside `#[cfg(test)]` code.
 
 ## Testing strategy
 
 | Layer | How it is checked |
 |---|---|
 | CRC / framing | Known-answer tests (`x25_known_vectors`), round-trip, corruption rejection, resync, truncation. |
+| CRC independence | `tests/reliability.rs` re-implements CRC-16/X.25 bit-at-a-time and compares it against the production nibble implementation over every byte value and random buffers up to 4 KiB. |
+| Corruption | Every single bit of every byte in a frame's payload/checksum is flipped and must be rejected. |
+| Hostile input | 50 000 pseudo-random bytes (with start markers sprinkled in) must never panic and must never grow the parser buffer past `Parser::MAX_BUFFERED`. |
+| Length byte | All 256 declared payload lengths round-trip. |
+| Truncation | Every truncation of every known message decodes without panicking. |
 | Message layouts | Canonical `CRC_EXTRA`, byte-offset assertions, pack/decode round-trips. |
 | Crash detection | Six scenarios including "fell then flew again". |
 | LED | Blink/breathe tables, calibration breathing speed-up. |
 | FSM | Boot → MAG_OK, rotation → calibration → success, bad-DIA retry, mode guard stop, landing relay, crash relay. |
-| Transport | TCP forwarding, UDP double-send, GCS→FC, calibration-spam suppression. |
+| Transport | TCP forwarding, UDP double-send, MAVLink 1 passthrough, GCS→FC, calibration-spam suppression. |
 | Console | Every command, persistence, restart, junk input. |
 
 Run with:

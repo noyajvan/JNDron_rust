@@ -31,10 +31,10 @@ use ws2812_esp32_rmt_driver::driver::Ws2812Esp32Rmt;
 
 use flight_core::config::StoredConfig;
 use flight_core::io::Io;
-use flight_core::{Config, MAV_COMP_ID_ONBOARD_COMPUTER};
+use flight_core::Config;
 
 use crate::consts::{
-    GCS_PORT_TCP, GCS_PORT_UDP, LED_PIN, LED_VCC_GRB, NVS_NAMESPACE, RX_GPIO, TX_GPIO,
+    GCS_PORT_TCP, GCS_PORT_UDP, LED_PIN, LED_VCC_GRB, NVS_NAMESPACE,
 };
 
 /// The board.
@@ -47,7 +47,10 @@ pub struct Platform {
 
     udp: UdpSocket,
     tcp: Option<TcpStream>,
-    gcs: SocketAddr,
+    /// GCS address for the outgoing TCP relay.
+    gcs_tcp: SocketAddr,
+    /// GCS address for UDP fallback (same host, UDP port).
+    gcs_udp: SocketAddr,
     tcp_last_try_ms: u32,
     tcp_was_up: bool,
 }
@@ -97,7 +100,8 @@ impl Platform {
             wifi_on: false,
             udp,
             tcp: None,
-            gcs: SocketAddr::from((gcs, GCS_PORT_TCP)),
+            gcs_tcp: SocketAddr::from((gcs, GCS_PORT_TCP)),
+            gcs_udp: SocketAddr::from((gcs, GCS_PORT_UDP)),
             tcp_last_try_ms: 0,
             tcp_was_up: false,
         })
@@ -174,7 +178,7 @@ impl Platform {
             return;
         }
         self.tcp_last_try_ms = now;
-        match TcpStream::connect_timeout(&self.gcs, Duration::from_millis(2_000)) {
+        match TcpStream::connect_timeout(&self.gcs_tcp, Duration::from_millis(2_000)) {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
                 let _ = s.set_nonblocking(true);
@@ -279,7 +283,7 @@ impl Io for Platform {
     }
 
     fn udp_send(&mut self, data: &[u8]) -> bool {
-        self.udp.send_to(data, self.gcs.with_port_from_udp()).is_ok()
+        self.udp.send_to(data, self.gcs_udp).is_ok()
     }
 
     fn log(&mut self, line: &str) {
@@ -338,20 +342,4 @@ impl Io for Platform {
     fn wifi_retry_connect(&mut self) {
         let _ = self.wifi.connect();
     }
-}
-
-/// Small helper so `udp_send` can reuse the same GCS IPv4 with the UDP port.
-trait WithUdpPort {
-    fn with_port_from_udp(self) -> SocketAddr;
-}
-
-impl WithUdpPort for SocketAddr {
-    fn with_port_from_udp(self) -> SocketAddr {
-        SocketAddr::new(self.ip(), GCS_PORT_UDP)
-    }
-}
-
-#[allow(dead_code)]
-fn _assert_consts() {
-    let _ = (MAV_COMP_ID_ONBOARD_COMPUTER, RX_GPIO, TX_GPIO);
 }
