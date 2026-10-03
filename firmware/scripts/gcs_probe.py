@@ -172,8 +172,8 @@ def main():
                     last_new = time.time()
             del buf[:total]
 
-        if order and time.time() - last_new > 10:
-            print(f"no new parameter for 10s, stopping at index {order[-1]}")
+        if order and time.time() - last_new > 25:
+            print(f"no new parameter for 25s, stopping at index {order[-1]}")
             break
 
     print(f"param_count reported : {param_count}")

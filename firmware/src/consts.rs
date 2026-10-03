@@ -32,11 +32,6 @@ pub const NVS_NAMESPACE: &str = "dbridge";
 /// send buffer. Queuing it here instead of dropping it is what makes Mission
 /// Planner's "Getting params" finish.
 pub const TCP_TX_QUEUE: usize = 64 * 1024;
-
-/// Stop reading the flight controller once this much is queued towards the
-/// relay. The FC's own UART buffer then provides the backpressure and ArduPilot
-/// paces its output, instead of the bridge silently dropping frames.
-pub const TCP_TX_HIGH_WATER: usize = 48 * 1024;
 // Flight-controller UART pins on the ESP32-S3-DevKitC-1: TX = GPIO43,
 // RX = GPIO44. They are wired directly in `Platform::new`, because the HAL
 // needs the concrete pin singletons rather than a number.

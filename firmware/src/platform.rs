@@ -43,6 +43,8 @@ pub struct Platform {
     nvs: EspNvs<NvsDefault>,
     wifi: BlockingWifi<EspWifi<'static>>,
     wifi_on: bool,
+    /// Security mode to ask for, refreshed from a scan before joining.
+    auth_method: AuthMethod,
 
     udp: UdpSocket,
     tcp: Option<TcpStream>,
@@ -63,8 +65,6 @@ pub struct Platform {
     tx_dropped: u64,
     /// Rate limit for the "send queue full" log line.
     tx_last_drop_log_ms: u32,
-    /// Rate limit for the "paused the FC link" log line.
-    tx_last_pause_log_ms: u32,
 }
 
 impl Platform {
@@ -145,6 +145,7 @@ impl Platform {
             nvs,
             wifi,
             wifi_on: false,
+            auth_method: AuthMethod::WPA2Personal,
             udp,
             tcp: None,
             gcs_tcp: SocketAddr::from((gcs, GCS_PORT_TCP)),
@@ -155,7 +156,6 @@ impl Platform {
             tx_queue: VecDeque::new(),
             tx_dropped: 0,
             tx_last_drop_log_ms: 0,
-            tx_last_pause_log_ms: 0,
         })
     }
 
@@ -302,21 +302,12 @@ impl Platform {
     /// Read the flight controller's UART and push it into the bridge (mirrors
     /// `bridgeFCtoWiFi()`).
     pub fn pump_fc(&mut self, bridge: &mut flight_core::Bridge) {
-        // Backpressure instead of loss: while a lot is still queued towards the
-        // relay, stop reading the flight controller. Its own UART buffer then
-        // fills and ArduPilot paces its output, which is exactly what MAVLink
-        // expects, where dropping frames is not.
-        if self.tx_queue.len() >= crate::consts::TCP_TX_HIGH_WATER {
-            let now = self.now_ms();
-            if now.wrapping_sub(self.tx_last_pause_log_ms) >= 10_000 {
-                self.tx_last_pause_log_ms = now;
-                log::warn!(
-                    "relay: {} bytes queued, pausing the FC link until the 4G link drains",
-                    self.tx_queue.len()
-                );
-            }
-            return;
-        }
+        // Deliberately *not* pausing the FC link when the queue is deep. That was
+        // tried and it is worse than dropping frames: it stops outgoing traffic
+        // altogether, the VPS relay drops a drone that is silent for 15 seconds, and
+        // the ground station sees the link hang. Losing telemetry is something
+        // MAVLink recovers from; going mute is not. The queue absorbs bursts, and if
+        // it does fill, `queue_tx` counts what it had to drop.
         let mut buf = [0u8; flight_core::consts::BRIDGE_BUF_SIZE];
         let mut total = 0usize;
         // Cap the work per loop iteration, like the C++ `for (pass < 16)`.
@@ -360,7 +351,12 @@ impl Platform {
     /// Push as much of the pending queue into the relay socket as it will take.
     fn flush_tx(&mut self) {
         let mut broken = false;
-        while !self.tx_queue.is_empty() {
+        // Cap the work per call. The main loop has to keep servicing the UART, the
+        // console and the Wi-Fi driver; draining an arbitrarily deep queue in one go
+        // is what invited an interrupt watchdog reset ("Interrupt wdt timeout on
+        // CPU1") when 49 KiB had piled up against a weak 4G link.
+        let mut budget: usize = 8 * 1024;
+        while !self.tx_queue.is_empty() && budget > 0 {
             if self.tx_queue.as_slices().0.is_empty() {
                 // Wrapped ring: make it contiguous before writing from the front.
                 self.tx_queue.make_contiguous();
@@ -380,6 +376,7 @@ impl Platform {
             if sent == 0 {
                 break;
             }
+            budget = budget.saturating_sub(sent);
             self.tx_queue.drain(..sent);
         }
         if broken {
@@ -398,6 +395,37 @@ impl Platform {
         let scale = |c: u8| ((c as u16 * out.brightness as u16) / 255) as u8;
         // The on-board WS2812 on the DevKitC-1 is wired G-R-B.
         let _ = self.led.write(&[scale(g), scale(r), scale(b)]);
+    }
+
+    /// Ask for the security mode the access point actually offers.
+    ///
+    /// Asking for WPA2 against a hotspot that offers only WPA3, or WPA2/WPA3
+    /// transition, fails the four-way handshake even with the correct password -
+    /// measured on this board as `wifi:state: init -> auth -> assoc` followed by
+    /// `assoc -> init (0x400)` once a second, which looks exactly like a bad key.
+    /// The scan costs a couple of seconds and runs once per activation (not on the
+    /// 30 s retries), and the result is cached for the next attempt.
+    fn refresh_auth_method(&mut self, ssid: &str) {
+        match self.wifi.scan() {
+            Ok(aps) => {
+                let offered = aps
+                    .iter()
+                    .find(|ap| ap.ssid.as_str() == ssid)
+                    .and_then(|ap| ap.auth_method);
+                match offered {
+                    Some(method) if method != self.auth_method => {
+                        log::info!("wifi: '{ssid}' offers {method:?}, asking for that");
+                        self.auth_method = method;
+                    }
+                    Some(method) => log::info!("wifi: '{ssid}' offers {method:?}"),
+                    None => log::warn!(
+                        "wifi: '{ssid}' not in the scan, keeping {:?}",
+                        self.auth_method
+                    ),
+                }
+            }
+            Err(e) => log::warn!("wifi: scan failed, keeping {:?} ({e:?})", self.auth_method),
+        }
     }
 }
 
@@ -518,6 +546,17 @@ impl Io for Platform {
         }
     }
 
+    fn tx_power_dbm(&self) -> i32 {
+        // ESP-IDF reports the configured maximum in quarter-dBm steps.
+        let mut quarter_dbm: i8 = 0;
+        let err = unsafe { esp_idf_svc::sys::esp_wifi_get_max_tx_power(&mut quarter_dbm) };
+        if err == esp_idf_svc::sys::ESP_OK {
+            quarter_dbm as i32 / 4
+        } else {
+            0
+        }
+    }
+
     fn tcp_connected(&self) -> bool {
         self.tcp.is_some()
     }
@@ -526,14 +565,29 @@ impl Io for Platform {
         // The joined network is exactly the configured one: no scan-based
         // selection and no driver-side profile (see `Platform::new`).
         log::info!("wifi: joining configured network '{}'", cfg.sta_ssid);
+        let _ = self.wifi.start();
+        self.refresh_auth_method(cfg.sta_ssid.as_str());
+        // The original C++ firmware set the radio up like this, and says why in a
+        // comment: "adaptive power removed: fixed 11 dBm is a verified working value
+        // (at 2 dBm the link is weaker, the maximum is not needed)", together with
+        // `WiFi.setSleep(false)`. Fewer dBm means less heat and less current, which
+        // matters on a marginal USB supply. ESP-IDF takes quarter-dBm units, so
+        // 11 dBm is 44. Modem sleep is off because its latency spikes make a relay
+        // link look unreliable.
+        unsafe {
+            let tx = esp_idf_svc::sys::esp_wifi_set_max_tx_power(44);
+            let ps = esp_idf_svc::sys::esp_wifi_set_ps(
+                esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_NONE,
+            );
+            log::info!("wifi: tx power 11 dBm (err={tx}), power save off (err={ps})");
+        }
         let conf = Configuration::Client(ClientConfiguration {
             ssid: cfg.sta_ssid.as_str().try_into().unwrap_or_default(),
             password: cfg.sta_pass.as_str().try_into().unwrap_or_default(),
-            auth_method: AuthMethod::WPA2Personal,
+            auth_method: self.auth_method,
             ..Default::default()
         });
         let _ = self.wifi.set_configuration(&conf);
-        let _ = self.wifi.start();
         let _ = self.wifi.connect();
         self.wifi_on = true;
     }

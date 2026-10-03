@@ -33,15 +33,23 @@ MAV_CMD_PREFLIGHT_STORAGE = 245
 # roughly 2 KiB/s of telemetry, which a 4G link carries comfortably, while the
 # parameter list arrives in about twenty seconds instead of two minutes.
 TARGETS = [
-    ("SR2_PARAMS", 10.0),      # the parameter list itself
-    ("SR2_EXTRA1", 10.0),      # ATTITUDE
-    ("SR2_EXTRA2", 10.0),      # VFR_HUD
-    ("SR2_EXTRA3", 5.0),       # AHRS, SYSTEM_TIME, BATTERY_STATUS
-    ("SR2_EXT_STAT", 5.0),     # SYS_STATUS, POWER_STATUS, MEMINFO
-    ("SR2_POSITION", 5.0),     # GLOBAL_POSITION_INT
-    ("SR2_RAW_SENS", 5.0),     # RAW_IMU, GPS_RAW_INT, SCALED_PRESSURE
-    ("SR2_RC_CHAN", 5.0),      # RC_CHANNELS, SERVO_OUTPUT_RAW
+    ("SR2_PARAMS", 10.0),      # the parameter list itself (10 is the accepted maximum)
+    ("SR2_EXTRA1", 3.0),       # ATTITUDE
+    ("SR2_EXTRA2", 3.0),       # VFR_HUD
+    ("SR2_EXTRA3", 2.0),       # AHRS, SYSTEM_TIME, BATTERY_STATUS
+    ("SR2_EXT_STAT", 2.0),     # SYS_STATUS, POWER_STATUS, MEMINFO
+    ("SR2_POSITION", 2.0),     # GLOBAL_POSITION_INT
+    ("SR2_RAW_SENS", 2.0),     # RAW_IMU, GPS_RAW_INT, SCALED_PRESSURE
+    ("SR2_RC_CHAN", 2.0),      # RC_CHANNELS, SERVO_OUTPUT_RAW
 ]
+
+# Rate history, for anyone reading this later: the flight controller shipped with
+# SR2_* at 2-10 Hz, which made a 1129-parameter download take about two minutes and
+# let Mission Planner retry until it gave up. Raising the lot to 5-10 Hz fixed the
+# download but produced more telemetry than a weak hotspot managed (RSSI -73 dBm),
+# so the bridge's send queue grew to 49 KiB. The values above are the middle ground:
+# about 650 bytes/s of steady telemetry, which this link carries, with the parameter
+# list still sent at its maximum.
 
 # The flight controller rejected SR2_PARAMS=50 outright (the value stayed 2, so it
 # was range-checked away rather than clamped). Overridable so the accepted maximum
