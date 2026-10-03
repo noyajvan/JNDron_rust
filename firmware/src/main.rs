@@ -14,8 +14,6 @@
 mod consts;
 mod platform;
 
-use std::net::SocketAddr;
-
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
@@ -33,7 +31,7 @@ fn main() -> anyhow::Result<()> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs_partition = EspDefaultNvsPartition::take()?;
 
-    let mut platform = Platform::new(peripherals, sys_loop, nvs_partition, consts::GCS_IP)?;
+    let mut platform = Platform::new(peripherals, sys_loop, nvs_partition)?;
 
     // `loadConfig()`: NVS values, with the same defaults as the C++ firmware.
     // Built-in credentials: a board with nothing stored (or with an explicitly
@@ -50,12 +48,23 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
+    // The relay address is configuration, not source: this repository is public and
+    // the relay accepts any client, so the address belongs on the device.
+    platform.set_relay_host(&cfg.gcs_host);
+    if !cfg.has_relay() {
+        log::warn!("relay address not stored: use HOST=<ip>, then SAVE");
+    }
+
     let mut bridge = Bridge::new(cfg);
     bridge.boot(&mut platform);
 
     log::info!(
-        "JNDron ready (gcs={})",
-        SocketAddr::from((consts::GCS_IP, consts::GCS_PORT_TCP))
+        "JNDron ready (relay={})",
+        if bridge.cfg.has_relay() {
+            format!("{}:{}", bridge.cfg.gcs_host, consts::GCS_PORT_TCP)
+        } else {
+            "not configured".to_string()
+        }
     );
 
     loop {

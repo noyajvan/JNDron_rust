@@ -20,6 +20,9 @@ hard split between **testable protocol logic** and **hardware glue**.
 |---|---|
 | `crates/flight-core/` | Portable, dependency-free, **host-tested** logic: MAVLink codec, crash detector, LED logic, FSM, console parser, config. |
 | `firmware/` | ESP32-S3 binary (`esp-idf-svc`). The only place that touches UART / Wi-Fi / sockets / NVS / NeoPixel. |
+| `firmware/scripts/` | Field tools: a GCS probe, flight-controller stream rates, CRC_EXTRA self tests, a bootloader reset. |
+| `docs/TROUBLESHOOTING.md` | What breaks on real hardware, how it shows up in a log, what to do - with the measurements behind it. |
+| `docs/PROJECT-STATE.md` | Living handoff: what is verified, what is pending, and the working agreement for keeping context small. |
 
 `cargo test` at the repository root only builds `flight-core`; the firmware
 crate is excluded because it targets `xtensa-esp32s3-espidf`.

@@ -60,6 +60,19 @@ impl Bridge {
             } else {
                 io.log(">> Invalid baud");
             }
+        } else if let Some(v) = cmd.strip_prefix("HOST=") {
+            let val = v.trim();
+            if val.is_empty() {
+                self.cfg.gcs_host.clear();
+                io.set_relay_host("");
+                io.log(">> Relay address cleared, relay off");
+            } else if val.parse::<std::net::Ipv4Addr>().is_ok() {
+                self.cfg.gcs_host = val.to_string();
+                io.set_relay_host(val);
+                io.log(&format!(">> Relay host = {}", self.cfg.gcs_host));
+            } else {
+                io.log(">> Invalid address, expected HOST=1.2.3.4");
+            }
         } else if let Some(v) = cmd.strip_prefix("SYSID=") {
             let sid: u32 = v.trim().parse().unwrap_or(0);
             if (1..=255).contains(&sid) {
@@ -84,7 +97,7 @@ impl Bridge {
             io.restart();
         } else {
             io.log(
-                "CMD: STATUS | SSID=name | PASS=pass | BAUD= | SYSID= | \
+                "CMD: STATUS | SSID=name | PASS=pass | BAUD= | HOST=ip | SYSID= | \
                  WIFI OFF | WIFI ON | RELAY | DISARM | SAVE",
             );
         }
@@ -131,6 +144,14 @@ impl Bridge {
                 "no pass"
             } else {
                 "pass set"
+            }
+        ));
+        io.log(&format!(
+            "Relay: {}",
+            if self.cfg.has_relay() {
+                self.cfg.gcs_host.clone()
+            } else {
+                "not set - HOST=<ip> then SAVE".to_string()
             }
         ));
     }

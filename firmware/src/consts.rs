@@ -2,10 +2,11 @@
 //!
 //! These mirror `firmware/include/config.h` from the original C++ project.
 
-use std::net::Ipv4Addr;
+// The relay's address is deliberately *not* here. This repository is public, and
+// the relay accepts any client, so a hard-coded address publishes an invitation to
+// command the aircraft. It lives in NVS on the device instead: `HOST=<ip>` on the
+// console, then `SAVE`. See `Config::gcs_host`.
 
-/// Oracle VPS that relays telemetry to Mission Planner.
-pub const GCS_IP: Ipv4Addr = Ipv4Addr::new(152, 70, 51, 224);
 /// Outgoing TCP relay port on the VPS (primary, reliable transport).
 pub const GCS_PORT_TCP: u16 = 14_553;
 /// UDP fallback port (drained by the VPS and by Mission Planner).

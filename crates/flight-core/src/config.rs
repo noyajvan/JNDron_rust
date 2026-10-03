@@ -11,6 +11,14 @@ pub struct Config {
     pub baud: u32,
     /// MAVLink system id of the bridge itself.
     pub sys_id: u8,
+    /// Relay endpoint (the VPS that forwards telemetry to the ground station), as
+    /// an IPv4 address in text form. Empty means "not configured", and the bridge
+    /// then stays off the network entirely.
+    ///
+    /// Deliberately *not* a compile-time constant: this repository is public, and a
+    /// relay that accepts any client means publishing its address invites strangers
+    /// to command the aircraft. The address belongs on the device, in NVS.
+    pub gcs_host: String,
 }
 
 impl Default for Config {
@@ -21,6 +29,7 @@ impl Default for Config {
             sta_pass: String::new(),
             baud: 921_600,
             sys_id: 1,
+            gcs_host: String::new(),
         }
     }
 }
@@ -48,6 +57,11 @@ impl Config {
         !self.sta_ssid.is_empty()
     }
 
+    /// Is a relay endpoint configured?
+    pub fn has_relay(&self) -> bool {
+        !self.gcs_host.is_empty()
+    }
+
     /// Validate a baud rate, matching the C++ `BAUD=` command range check.
     pub fn is_valid_baud(b: u32) -> bool {
         (9_600..=921_600).contains(&b)
@@ -61,6 +75,7 @@ pub struct StoredConfig {
     pub pass: Option<String>,
     pub baud: Option<u32>,
     pub sys_id: Option<u8>,
+    pub gcs_host: Option<String>,
 }
 
 impl Config {
@@ -73,6 +88,9 @@ impl Config {
         }
         if let Some(p) = stored.pass {
             self.sta_pass = p;
+        }
+        if let Some(h) = stored.gcs_host {
+            self.gcs_host = h;
         }
         self.baud = stored.baud.unwrap_or(921_600);
         // `cfg.sys_id = p.getUInt("sys_id", 1); cfg.sys_id = 1;`

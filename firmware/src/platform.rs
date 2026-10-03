@@ -48,10 +48,10 @@ pub struct Platform {
 
     udp: UdpSocket,
     tcp: Option<TcpStream>,
-    /// GCS address for the outgoing TCP relay.
-    gcs_tcp: SocketAddr,
-    /// GCS address for UDP fallback (same host, UDP port).
-    gcs_udp: SocketAddr,
+    /// Relay address for the outgoing TCP link, once configured.
+    gcs_tcp: Option<SocketAddr>,
+    /// Relay address for the UDP fallback (same host, UDP port).
+    gcs_udp: Option<SocketAddr>,
     tcp_last_try_ms: u32,
     tcp_was_up: bool,
     /// Rate limit for the "TCP connect failed" log line.
@@ -72,7 +72,6 @@ impl Platform {
         peripherals: esp_idf_hal::peripherals::Peripherals,
         sys_loop: esp_idf_svc::eventloop::EspSystemEventLoop,
         nvs_partition: EspDefaultNvsPartition,
-        gcs: Ipv4Addr,
     ) -> anyhow::Result<Self> {
         // --- Flight-controller UART (UART0, TX=GPIO43, RX=GPIO44) ---
         let uart = UartDriver::new(
@@ -148,8 +147,9 @@ impl Platform {
             auth_method: AuthMethod::WPA2Personal,
             udp,
             tcp: None,
-            gcs_tcp: SocketAddr::from((gcs, GCS_PORT_TCP)),
-            gcs_udp: SocketAddr::from((gcs, GCS_PORT_UDP)),
+            // Set by `set_relay_host` once the stored configuration is known.
+            gcs_tcp: None,
+            gcs_udp: None,
             tcp_last_try_ms: 0,
             tcp_was_up: false,
             tcp_last_log_ms: 0,
@@ -178,6 +178,7 @@ impl Platform {
             pass: self.nvs_get_str("pass"),
             baud: self.nvs_get_u32("baud"),
             sys_id: self.nvs_get_u32("sys_id").map(|v| v as u8),
+            gcs_host: self.nvs_get_str("gcs_host"),
         }
     }
 
@@ -242,26 +243,36 @@ impl Platform {
             self.flush_tx();
             return;
         }
+        let Some(gcs_tcp) = self.gcs_tcp else {
+            // No relay configured: stand still instead of dialling nowhere, and say
+            // so once in a while so the reason is visible on the console.
+            let now = self.now_ms();
+            if now.wrapping_sub(self.tcp_last_log_ms) >= 30_000 {
+                self.tcp_last_log_ms = now;
+                log::warn!("relay: no endpoint configured (use HOST=<ip>, then SAVE)");
+            }
+            return;
+        };
         self.tcp_was_up = false;
         let now = self.now_ms();
         if now.wrapping_sub(self.tcp_last_try_ms) < 3_000 {
             return;
         }
         self.tcp_last_try_ms = now;
-        match TcpStream::connect_timeout(&self.gcs_tcp, Duration::from_millis(2_000)) {
+        match TcpStream::connect_timeout(&gcs_tcp, Duration::from_millis(2_000)) {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
                 let _ = s.set_nonblocking(true);
                 self.tcp = Some(s);
                 self.tcp_was_up = true;
-                log::info!("relay: TCP connected to {}", self.gcs_tcp);
+                log::info!("relay: TCP connected to {gcs_tcp}");
             }
             Err(e) => {
                 self.tcp = None;
                 // Rate limited, otherwise a dead VPS floods the console.
                 if now.wrapping_sub(self.tcp_last_log_ms) >= 30_000 {
                     self.tcp_last_log_ms = now;
-                    log::warn!("relay: TCP connect to {} failed: {e:?}", self.gcs_tcp);
+                    log::warn!("relay: TCP connect to {gcs_tcp} failed: {e:?}");
                 }
             }
         }
@@ -474,7 +485,10 @@ impl Io for Platform {
     }
 
     fn udp_send(&mut self, data: &[u8]) -> bool {
-        self.udp.send_to(data, self.gcs_udp).is_ok()
+        match self.gcs_udp {
+            Some(addr) => self.udp.send_to(data, addr).is_ok(),
+            None => false,
+        }
     }
 
     fn log(&mut self, line: &str) {
@@ -500,6 +514,7 @@ impl Io for Platform {
         let _ = self.nvs.set_str("pass", &cfg.sta_pass);
         let _ = self.nvs.set_u32("baud", cfg.baud);
         let _ = self.nvs.set_u32("sys_id", cfg.sys_id as u32);
+        let _ = self.nvs.set_str("gcs_host", &cfg.gcs_host);
     }
 
     fn restart(&mut self) {
@@ -508,6 +523,23 @@ impl Io for Platform {
 
     fn wifi_connected(&self) -> bool {
         self.wifi.is_connected().unwrap_or(false)
+    }
+
+    fn set_relay_host(&mut self, host: &str) {
+        let parsed = host
+            .trim()
+            .parse::<Ipv4Addr>()
+            .ok()
+            .filter(|ip| !ip.is_unspecified());
+        self.gcs_tcp = parsed.map(|ip| SocketAddr::from((ip, GCS_PORT_TCP)));
+        self.gcs_udp = parsed.map(|ip| SocketAddr::from((ip, GCS_PORT_UDP)));
+        // A different endpoint means the existing socket points at the wrong place.
+        self.tcp = None;
+        self.tx_queue.clear();
+        match parsed {
+            Some(ip) => log::info!("relay: endpoint {ip}:{GCS_PORT_TCP}"),
+            None => log::warn!("relay: no endpoint configured (use HOST=<ip>, then SAVE)"),
+        }
     }
 
     fn local_ip(&self) -> String {

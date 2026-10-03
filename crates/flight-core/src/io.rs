@@ -33,6 +33,10 @@ pub trait Io {
     /// Emit a human-readable line on the USB console (no trailing newline).
     fn log(&mut self, line: &str);
 
+    /// Point the relay link at `host` (empty disables it). Called at startup with
+    /// the stored configuration and whenever the operator changes it.
+    fn set_relay_host(&mut self, _host: &str) {}
+
     /// Persist the configuration (NVS `dbridge` namespace).
     fn save_config(&mut self, cfg: &crate::Config);
 
@@ -117,6 +121,8 @@ pub struct MockIo {
     /// Address reported by `local_ip`. Empty means "no address yet", the state a
     /// station is in after a reconnect whose DHCP never completed.
     pub ip: String,
+    /// Last value passed to `set_relay_host`.
+    pub relay_host: String,
     pub fc_out: Vec<u8>,
     pub tcp_out: Vec<u8>,
     pub udp_out: Vec<u8>,
@@ -178,6 +184,9 @@ impl Io for MockIo {
     }
     fn save_config(&mut self, cfg: &crate::Config) {
         self.saved = Some(cfg.clone());
+    }
+    fn set_relay_host(&mut self, host: &str) {
+        self.relay_host = host.to_string();
     }
     fn restart(&mut self) {
         self.restarts += 1;

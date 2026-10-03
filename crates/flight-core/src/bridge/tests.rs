@@ -627,6 +627,27 @@ fn console_configures_wifi_and_persists() {
 }
 
 #[test]
+fn relay_address_is_configured_on_the_device_not_in_source() {
+    let (mut b, mut io) = booted();
+    assert!(!b.cfg.has_relay(), "nothing is hard-coded any more");
+
+    b.run_command(&mut io, "HOST=203.0.113.7");
+    assert_eq!(b.cfg.gcs_host, "203.0.113.7");
+    assert_eq!(io.relay_host, "203.0.113.7");
+
+    // Nonsense must not wipe a working address.
+    b.run_command(&mut io, "HOST=not-an-address");
+    assert_eq!(b.cfg.gcs_host, "203.0.113.7");
+
+    b.run_command(&mut io, "SAVE");
+    assert_eq!(io.saved.as_ref().unwrap().gcs_host, "203.0.113.7");
+
+    b.run_command(&mut io, "HOST=");
+    assert!(!b.cfg.has_relay());
+    assert!(io.relay_host.is_empty());
+}
+
+#[test]
 fn console_wifi_off_on_and_relay_disarm() {
     let (mut b, mut io) = booted();
     b.run_command(&mut io, "WIFI OFF");
