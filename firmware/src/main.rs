@@ -13,7 +13,6 @@
 
 mod consts;
 mod platform;
-mod provisioning;
 
 use std::net::SocketAddr;
 
@@ -54,50 +53,12 @@ fn main() -> anyhow::Result<()> {
     let mut bridge = Bridge::new(cfg);
     bridge.boot(&mut platform);
 
-    // BLE provisioning is parked (see `consts::ENABLE_BLE_PROVISIONING`); with
-    // the built-in credentials above there is always an SSID, so this only runs
-    // when explicitly re-enabled.
-    if consts::ENABLE_BLE_PROVISIONING && !bridge.cfg.has_ssid() {
-        if let Err(e) = provisioning::start(consts::PROV_DEVICE_NAME) {
-            log::error!("BLE provisioning did not start: {e:?}");
-        }
-    }
-
     log::info!(
         "JNDron ready (gcs={})",
         SocketAddr::from((consts::GCS_IP, consts::GCS_PORT_TCP))
     );
 
-    // Set when BLE provisioning delivered credentials: the BLE service is kept
-    // alive for a while so the phone app can query the Wi-Fi state and report
-    // success, then released.
-    let mut prov_deadline: Option<u32> = None;
-
     loop {
-        // Wi-Fi credentials handed over by the phone app: store them and go.
-        if let Some((ssid, pass)) = provisioning::take_credentials() {
-            log::info!("provisioned over BLE: ssid='{ssid}'");
-            bridge.cfg.sta_ssid = ssid;
-            bridge.cfg.sta_pass = pass;
-            let cfg = bridge.cfg.clone();
-            flight_core::config::persist(&mut platform, &cfg);
-            bridge.wifi_activate(&mut platform);
-            prov_deadline = Some(platform.now_ms().wrapping_add(30_000));
-        }
-
-        if let Some(deadline) = prov_deadline {
-            // Stop once Wi-Fi is up, or after the grace period, whichever is
-            // first: a failed password should not keep the BLE service alive
-            // forever, and a successful one should not wait for the timeout.
-            let connected = platform.wifi_connected();
-            let expired = platform.now_ms().wrapping_sub(deadline) < 0x8000_0000;
-            if connected || expired {
-                log::info!("BLE provisioning finished (connected={connected}), releasing BLE");
-                provisioning::stop();
-                prov_deadline = None;
-            }
-        }
-
         // 1. USB console commands (handleTerminalConfig).
         platform.pump_console(&mut bridge);
         // 2. Keep the TCP relay link alive (tcpLinkService).
