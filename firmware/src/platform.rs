@@ -45,6 +45,8 @@ pub struct Platform {
     wifi_on: bool,
     /// Security mode to ask for, refreshed from a scan before joining.
     auth_method: AuthMethod,
+    /// Secret the relay expects from a drone before it accepts telemetry.
+    relay_token: String,
 
     udp: UdpSocket,
     tcp: Option<TcpStream>,
@@ -145,6 +147,7 @@ impl Platform {
             wifi,
             wifi_on: false,
             auth_method: AuthMethod::WPA2Personal,
+            relay_token: String::new(),
             udp,
             tcp: None,
             // Set by `set_relay_host` once the stored configuration is known.
@@ -179,6 +182,7 @@ impl Platform {
             baud: self.nvs_get_u32("baud"),
             sys_id: self.nvs_get_u32("sys_id").map(|v| v as u8),
             gcs_host: self.nvs_get_str("gcs_host"),
+            relay_token: self.nvs_get_str("token"),
         }
     }
 
@@ -262,6 +266,13 @@ impl Platform {
         match TcpStream::connect_timeout(&gcs_tcp, Duration::from_millis(2_000)) {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
+                // Identify ourselves before any telemetry if the relay expects a
+                // token, otherwise a stranger could take the drone slot. Written
+                // while the socket is still blocking, before any telemetry follows.
+                if !self.relay_token.is_empty() {
+                    let handshake = format!("DB {}\n", self.relay_token);
+                    let _ = std::io::Write::write_all(&mut &s, handshake.as_bytes());
+                }
                 let _ = s.set_nonblocking(true);
                 self.tcp = Some(s);
                 self.tcp_was_up = true;
@@ -515,6 +526,7 @@ impl Io for Platform {
         let _ = self.nvs.set_u32("baud", cfg.baud);
         let _ = self.nvs.set_u32("sys_id", cfg.sys_id as u32);
         let _ = self.nvs.set_str("gcs_host", &cfg.gcs_host);
+        let _ = self.nvs.set_str("token", &cfg.relay_token);
     }
 
     fn restart(&mut self) {
@@ -539,6 +551,18 @@ impl Io for Platform {
         match parsed {
             Some(ip) => log::info!("relay: endpoint {ip}:{GCS_PORT_TCP}"),
             None => log::warn!("relay: no endpoint configured (use HOST=<ip>, then SAVE)"),
+        }
+    }
+
+    fn set_relay_token(&mut self, token: &str) {
+        self.relay_token = token.to_string();
+        // The handshake only matters on a fresh connection.
+        self.tcp = None;
+        self.tx_queue.clear();
+        if self.relay_token.is_empty() {
+            log::info!("relay: no token required");
+        } else {
+            log::info!("relay: token set, will identify before telemetry");
         }
     }
 

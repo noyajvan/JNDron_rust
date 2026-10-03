@@ -19,6 +19,10 @@ pub struct Config {
     /// relay that accepts any client means publishing its address invites strangers
     /// to command the aircraft. The address belongs on the device, in NVS.
     pub gcs_host: String,
+    /// Shared secret the relay expects from a drone before it accepts telemetry.
+    /// Empty means the relay requires none. Also device configuration, for the same
+    /// reason as `gcs_host`.
+    pub relay_token: String,
 }
 
 impl Default for Config {
@@ -30,6 +34,7 @@ impl Default for Config {
             baud: 921_600,
             sys_id: 1,
             gcs_host: String::new(),
+            relay_token: String::new(),
         }
     }
 }
@@ -76,6 +81,7 @@ pub struct StoredConfig {
     pub baud: Option<u32>,
     pub sys_id: Option<u8>,
     pub gcs_host: Option<String>,
+    pub relay_token: Option<String>,
 }
 
 impl Config {
@@ -91,6 +97,9 @@ impl Config {
         }
         if let Some(h) = stored.gcs_host {
             self.gcs_host = h;
+        }
+        if let Some(t) = stored.relay_token {
+            self.relay_token = t;
         }
         self.baud = stored.baud.unwrap_or(921_600);
         // `cfg.sys_id = p.getUInt("sys_id", 1); cfg.sys_id = 1;`

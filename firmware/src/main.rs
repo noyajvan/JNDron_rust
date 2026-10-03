@@ -51,6 +51,7 @@ fn main() -> anyhow::Result<()> {
     // The relay address is configuration, not source: this repository is public and
     // the relay accepts any client, so the address belongs on the device.
     platform.set_relay_host(&cfg.gcs_host);
+    platform.set_relay_token(&cfg.relay_token);
     if !cfg.has_relay() {
         log::warn!("relay address not stored: use HOST=<ip>, then SAVE");
     }

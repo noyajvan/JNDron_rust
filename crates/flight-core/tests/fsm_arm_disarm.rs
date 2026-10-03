@@ -140,8 +140,8 @@ fn booted() -> (Bridge, MockIo) {
     io.connected = true;
     io.tcp = true;
     let cfg = Config {
-        sta_ssid: "LEO".into(),
-        sta_pass: "88888888".into(),
+        sta_ssid: "testnet".into(),
+        sta_pass: "testpass".into(),
         ..Config::default()
     };
     let mut b = Bridge::new(cfg);

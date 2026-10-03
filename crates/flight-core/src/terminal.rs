@@ -73,6 +73,16 @@ impl Bridge {
             } else {
                 io.log(">> Invalid address, expected HOST=1.2.3.4");
             }
+        } else if let Some(v) = cmd.strip_prefix("TOKEN=") {
+            let val = v.trim();
+            self.cfg.relay_token = val.to_string();
+            io.set_relay_token(val);
+            // Never echo a secret back; say only whether one is set.
+            io.log(if val.is_empty() {
+                ">> Relay token cleared"
+            } else {
+                ">> Relay token set"
+            });
         } else if let Some(v) = cmd.strip_prefix("SYSID=") {
             let sid: u32 = v.trim().parse().unwrap_or(0);
             if (1..=255).contains(&sid) {
@@ -97,7 +107,7 @@ impl Bridge {
             io.restart();
         } else {
             io.log(
-                "CMD: STATUS | SSID=name | PASS=pass | BAUD= | HOST=ip | SYSID= | \
+                "CMD: STATUS | SSID=name | PASS=pass | BAUD= | HOST=ip | TOKEN=secret | SYSID= | \
                  WIFI OFF | WIFI ON | RELAY | DISARM | SAVE",
             );
         }
@@ -147,11 +157,17 @@ impl Bridge {
             }
         ));
         io.log(&format!(
-            "Relay: {}",
+            "Relay: {}  token: {}",
             if self.cfg.has_relay() {
                 self.cfg.gcs_host.clone()
             } else {
                 "not set - HOST=<ip> then SAVE".to_string()
+            },
+            // Never print the secret itself.
+            if self.cfg.relay_token.is_empty() {
+                "none"
+            } else {
+                "set"
             }
         ));
     }

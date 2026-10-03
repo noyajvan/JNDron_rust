@@ -119,8 +119,10 @@ fn booted() -> (Bridge, MockIo) {
     io.tcp = true;
     io.ip = "10.0.0.2".into();
     let cfg = Config {
-        sta_ssid: "LEO".into(),
-        sta_pass: "88888888".into(),
+        // Obviously fake: real credentials do not belong in a public repository, not
+        // even as test data.
+        sta_ssid: "testnet".into(),
+        sta_pass: "testpass".into(),
         ..Config::default()
     };
     let mut b = Bridge::new(cfg);

@@ -37,6 +37,9 @@ pub trait Io {
     /// the stored configuration and whenever the operator changes it.
     fn set_relay_host(&mut self, _host: &str) {}
 
+    /// Shared secret the relay expects from a drone (empty = none).
+    fn set_relay_token(&mut self, _token: &str) {}
+
     /// Persist the configuration (NVS `dbridge` namespace).
     fn save_config(&mut self, cfg: &crate::Config);
 
@@ -123,6 +126,8 @@ pub struct MockIo {
     pub ip: String,
     /// Last value passed to `set_relay_host`.
     pub relay_host: String,
+    /// Last value passed to `set_relay_token`.
+    pub relay_token: String,
     pub fc_out: Vec<u8>,
     pub tcp_out: Vec<u8>,
     pub udp_out: Vec<u8>,
@@ -187,6 +192,9 @@ impl Io for MockIo {
     }
     fn set_relay_host(&mut self, host: &str) {
         self.relay_host = host.to_string();
+    }
+    fn set_relay_token(&mut self, token: &str) {
+        self.relay_token = token.to_string();
     }
     fn restart(&mut self) {
         self.restarts += 1;
