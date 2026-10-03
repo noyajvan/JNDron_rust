@@ -1,0 +1,15 @@
+# Partition table for the JNDron firmware (ESP32-S3-DevKitC-1, 4 MB flash).
+#
+# The stock `partitions_singleapp.csv` gives the application only 1 MiB. The
+# firmware already links ~854 KiB of flash content, so that layout leaves about
+# 170 KiB free and cannot grow.
+#
+# This table keeps `nvs` and `factory` at the very same offsets as the stock
+# layout, so already saved Wi-Fi credentials in NVS survive the reflash, and
+# grows the application partition to 3 MiB (the 4 MB part has ~3 MiB of flash
+# that the stock table never assigns to anything).
+#
+# Name,   Type, SubType, Offset, Size,  Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 3M,

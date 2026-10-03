@@ -23,6 +23,11 @@ pub struct Frame {
     pub payload: Vec<u8>,
     /// `true` when the message id is known and its CRC was verified.
     pub crc_checked: bool,
+    /// The frame exactly as it arrived on the wire.
+    ///
+    /// Needed to forward messages this crate has no schema for: without their
+    /// `CRC_EXTRA` a re-encoded checksum would be wrong.
+    pub raw: Vec<u8>,
 }
 
 impl Frame {
@@ -38,6 +43,24 @@ impl Frame {
             &self.payload,
             extra,
         )
+    }
+
+    /// The bytes to forward towards the GCS.
+    ///
+    /// Known messages are re-encoded as MAVLink 2, so trailing-zero truncation
+    /// applies. Unknown ones are forwarded **verbatim**: re-encoding them would
+    /// need their `CRC_EXTRA`, which this crate does not know, and a frame whose
+    /// checksum is computed without it is silently dropped by the receiver.
+    ///
+    /// That is exactly what used to stall Mission Planner on "Getting params":
+    /// `PARAM_VALUE` is not in the schema, so every parameter reply left the
+    /// bridge with a broken checksum.
+    pub fn relay_bytes(&self) -> Vec<u8> {
+        if self.crc_checked {
+            self.encode_v2(self.seq, crate::messages::defs::find(self.msgid))
+        } else {
+            self.raw.clone()
+        }
     }
 }
 
@@ -318,6 +341,7 @@ impl Parser {
                 None => false,
             };
 
+            let raw: Vec<u8> = self.buf[..total].to_vec();
             self.buf.drain(..total);
             self.frames_ok += 1;
             return Some(Frame {
@@ -327,6 +351,7 @@ impl Parser {
                 msgid,
                 payload,
                 crc_checked,
+                raw,
             });
         }
     }
@@ -364,6 +389,25 @@ mod tests {
         assert_eq!(f.msgid, 0);
         assert!(f.crc_checked);
         assert_eq!(f.payload, payload);
+    }
+
+    #[test]
+    fn unknown_message_is_relayed_verbatim() {
+        // `PARAM_VALUE` (id 22) is not in the schema, so its CRC_EXTRA is unknown
+        // here. Re-encoding it would produce a checksum the receiver drops, which
+        // is what used to hang Mission Planner on "Getting params".
+        let payload = vec![1, 2, 3, 4];
+        let wire = encode_v2(9, 1, 1, 22, &payload, Some(220));
+
+        let mut p = Parser::new();
+        let mut frames = Vec::new();
+        p.push_slice(&wire, &mut frames);
+        assert_eq!(frames.len(), 1);
+
+        let f = &frames[0];
+        assert!(!f.crc_checked, "unknown message must not claim a verified CRC");
+        assert_eq!(f.msgid, 22);
+        assert_eq!(f.relay_bytes(), wire, "must be forwarded byte for byte");
     }
 
     #[test]

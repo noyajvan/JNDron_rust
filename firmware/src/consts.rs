@@ -13,8 +13,23 @@ pub const GCS_PORT_UDP: u16 = 14_550;
 
 /// WS2812 status LED data pin (GPIO48 on the DevKitC-1).
 pub const LED_PIN: u8 = 48;
-/// Raw colour-order/voltage flag for the WS2812 driver (GRB, 5 V).
-pub const LED_VCC_GRB: u32 = 0;
+/// RMT channel used to drive the WS2812 (0..=3 on the ESP32-S3).
+pub const LED_RMT_CHANNEL: u8 = 0;
+
+/// Name advertised over BLE while waiting for Wi-Fi credentials.
+pub const PROV_DEVICE_NAME: &str = "JNDron";
+
+/// Credentials a board with nothing stored starts with, so it connects without
+/// any setup step. They are only defaults: `SSID=`/`PASS=`/`SAVE` on the console
+/// replace them.
+pub const DEFAULT_SSID: &str = "LEO";
+pub const DEFAULT_PASS: &str = "88888888";
+
+/// Wi-Fi provisioning over BLE is written and working (`provisioning.rs`), but
+/// parked for now: the built-in credentials above mean a board is never without
+/// a network, and keeping BLE off keeps the radio free for Wi-Fi and saves the
+/// ~290 KiB it costs. Flip this to `true` to bring the BLE setup path back.
+pub const ENABLE_BLE_PROVISIONING: bool = false;
 
 /// NVS namespace holding the Wi-Fi credentials (matches the C++ firmware).
 pub const NVS_NAMESPACE: &str = "dbridge";

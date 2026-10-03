@@ -576,10 +576,10 @@ impl Bridge {
         self.fc_bytes = self.fc_bytes.wrapping_add(data.len() as u32);
         for frame in frames {
             self.fc_msgs = self.fc_msgs.wrapping_add(1);
-            let def = defs::find(frame.msgid);
-            // Re-emit as MAVLink 2, keeping the FC's sysid/compid/seq and the
-            // message's own payload, like `mavlink_msg_to_send_buffer`.
-            let bytes = frame.encode_v2(frame.seq, def);
+            // Forward known messages re-encoded as MAVLink 2 (keeping the FC's
+            // sysid/compid/seq); unknown ones go through verbatim, because their
+            // checksum cannot be recomputed without knowing CRC_EXTRA.
+            let bytes = frame.relay_bytes();
             let msg = Message::decode(frame.msgid, &frame.payload);
             let spam = msg.is_calibration_spam();
             if !spam {

@@ -1,15 +1,33 @@
 [build]
-# Xtensa target used by the ESP32-S3 (installed via `espup install`).
+# Xtensa target used by the ESP32-S3 (installed via `espup install -t esp32s3`).
 target = "xtensa-esp32s3-espidf"
+
+# The Xtensa Rust toolchain ships `rust-src` but no prebuilt standard library
+# for the `xtensa-*-espidf` targets, so std is compiled from source here.
+[unstable]
+build-std = ["std", "panic_abort"]
 
 [target.xtensa-esp32s3-espidf]
 linker = "ldproxy"
-# `espflash` is the modern replacement for `esptool.py` + monitor.
-runner = "espflash flash --monitor"
+# The DevKitC-1 exposes its native USB-Serial/JTAG port. On this board the
+# ESP-IDF default reset sequence works; an explicit `--before usb-reset`
+# fails to establish the connection, and `--no-stub` matches the original
+# PlatformIO config (`upload_flags = --no-stub`).
+# `--partition-table` matters: esp-idf-sys builds its own stub IDF app and
+# never applies `partitions.csv` to the Rust image, so the layout the app is
+# flashed into has to come from espflash. See firmware/partitions.csv.
+# Set the port with the `ESPFLASH_PORT` environment variable, or pass -p.
+runner = "espflash flash --no-stub --monitor --partition-table partitions.csv"
 rustflags = ["--cfg", "espidf_time64"]
 
 [env]
 MCU = "esp32s3"
-ESP_IDF_VERSION = "v5.1"
-# Baud rate of the *external* UART that talks to the flight controller is set
-# in NVS at runtime (see `Bridge`/`Config`), not here.
+ESP_IDF_VERSION = "v5.5.5"
+# `embuild` (used by `esp-idf-sys`) infers the Cargo workspace root from the
+# target directory's parent. With `CARGO_TARGET_DIR` pointed outside the project
+# (e.g. onto another drive) that inference lands on a drive root, so
+# `sdkconfig.defaults` is not found and `cargo metadata` fails. Pin the workspace
+# root explicitly to this crate's directory (`firmware/`, the parent of `.cargo`).
+CARGO_WORKSPACE_DIR = { value = ".", relative = true }
+# The baud rate of the *external* UART that talks to the flight controller is
+# set in NVS at runtime (see `Bridge`/`Config`), not here.

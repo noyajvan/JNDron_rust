@@ -27,20 +27,18 @@ use esp_idf_hal::uart::{UartConfig, UartDriver};
 use esp_idf_hal::units::Hertz;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
-use ws2812_esp32_rmt_driver::driver::Ws2812Esp32Rmt;
+use ws2812_esp32_rmt_driver::Ws2812Esp32RmtDriver;
 
 use flight_core::config::StoredConfig;
 use flight_core::io::Io;
 use flight_core::Config;
 
-use crate::consts::{
-    GCS_PORT_TCP, GCS_PORT_UDP, LED_PIN, LED_VCC_GRB, NVS_NAMESPACE,
-};
+use crate::consts::{GCS_PORT_TCP, GCS_PORT_UDP, LED_PIN, LED_RMT_CHANNEL, NVS_NAMESPACE};
 
 /// The board.
 pub struct Platform {
     uart: UartDriver<'static>,
-    led: Ws2812Esp32Rmt<'static>,
+    led: Ws2812Esp32RmtDriver,
     nvs: EspNvs<NvsDefault>,
     wifi: BlockingWifi<EspWifi<'static>>,
     wifi_on: bool,
@@ -53,6 +51,10 @@ pub struct Platform {
     gcs_udp: SocketAddr,
     tcp_last_try_ms: u32,
     tcp_was_up: bool,
+    /// Rate limit for the "TCP connect failed" log line.
+    tcp_last_log_ms: u32,
+    /// Rate limit for the "only part of the frame was queued" log line.
+    tcp_short_log_ms: u32,
 }
 
 impl Platform {
@@ -71,12 +73,15 @@ impl Platform {
             Option::<AnyIOPin>::None,
             &UartConfig::new()
                 .baudrate(Hertz(921_600))
-                .rx_fifo_size(flight_core::consts::FC_RX_BUF as u32)
-                .tx_fifo_size(flight_core::consts::FC_TX_BUF as u32),
+                .rx_fifo_size(flight_core::consts::FC_RX_BUF)
+                .tx_fifo_size(flight_core::consts::FC_TX_BUF),
         )?;
 
         // --- WS2812 status LED on GPIO48 ---
-        let led = Ws2812Esp32Rmt::new(peripherals.rmt.channel0, LED_PIN)
+        // `Ws2812Esp32RmtDriver` owns RMT channel 0 and drives the pixel through
+        // the ESP-IDF (legacy) RMT driver, so it takes a channel number and a
+        // raw GPIO number rather than HAL pin singletons.
+        let led = Ws2812Esp32RmtDriver::new(LED_RMT_CHANNEL, LED_PIN as u32)
             .map_err(|e| anyhow::anyhow!("ws2812 rmt init: {e:?}"))?;
 
         // --- NVS namespace for the configuration ---
@@ -87,6 +92,34 @@ impl Platform {
             EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs_partition))?,
             sys_loop,
         )?;
+
+        // The driver keeps its *own* copy of the station config in NVS
+        // (`WIFI_STORAGE_FLASH` is the default), including the BSSID it last
+        // associated with. That stale profile survives reflashes, credential
+        // changes and reboots alike, so once the hotspot was recreated with a
+        // new BSSID every association timed out on the auth step (`auth -> init`
+        // after exactly one second) instead of using the AP found by a fresh
+        // scan. Drop it, and keep driver state in RAM from now on: the
+        // credentials that matter live in our own NVS namespace above.
+        unsafe {
+            let restored = esp_idf_svc::sys::esp_wifi_restore();
+            let storage = esp_idf_svc::sys::esp_wifi_set_storage(
+                esp_idf_svc::sys::wifi_storage_t_WIFI_STORAGE_RAM,
+            );
+            log::info!("wifi: cleared stored profile (restore={restored}, storage={storage})");
+        }
+
+        // --- USB Serial/JTAG console (input) ---
+        // The console output goes through `Io::log`; input needs the driver so
+        // that the main loop can poll it without blocking. Installing it also
+        // switches the console VFS to the driver's ring buffers.
+        let mut console_cfg = esp_idf_svc::sys::usb_serial_jtag_driver_config_t {
+            tx_buffer_size: 256,
+            rx_buffer_size: 1024,
+        };
+        unsafe {
+            esp_idf_svc::sys::usb_serial_jtag_driver_install(&mut console_cfg);
+        }
 
         // --- Sockets ---
         let udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, GCS_PORT_UDP))?;
@@ -104,6 +137,8 @@ impl Platform {
             gcs_udp: SocketAddr::from((gcs, GCS_PORT_UDP)),
             tcp_last_try_ms: 0,
             tcp_was_up: false,
+            tcp_last_log_ms: 0,
+            tcp_short_log_ms: 0,
         })
     }
 
@@ -146,12 +181,24 @@ impl Platform {
         }
     }
 
-    fn console_read(&mut self, _buf: &mut [u8]) -> anyhow::Result<usize> {
-        // The Rust ESP-IDF firmware reads the console through `std::io::stdin`
-        // (mapped to the USB Serial/JTAG console configured in
-        // `sdkconfig.defaults`). A dedicated `UsbSerialJtag` driver can be
-        // dropped in here if you need finer control.
-        Ok(0)
+    fn console_read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize> {
+        // The console is the USB Serial/JTAG port configured in
+        // `sdkconfig.defaults`. Reading it through the driver with a zero tick
+        // timeout keeps the 1 ms main loop non-blocking; `pump_console` above
+        // was previously a stub, which made the whole command set (SSID=,
+        // PASS=, SAVE, ...) unusable on real hardware.
+        let n = unsafe {
+            esp_idf_svc::sys::usb_serial_jtag_read_bytes(
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                buf.len() as u32,
+                0,
+            )
+        };
+        if n <= 0 {
+            Ok(0)
+        } else {
+            Ok(n as usize)
+        }
     }
 
     // -----------------------------------------------------------------
@@ -184,9 +231,15 @@ impl Platform {
                 let _ = s.set_nonblocking(true);
                 self.tcp = Some(s);
                 self.tcp_was_up = true;
+                log::info!("relay: TCP connected to {}", self.gcs_tcp);
             }
-            Err(_) => {
+            Err(e) => {
                 self.tcp = None;
+                // Rate limited, otherwise a dead VPS floods the console.
+                if now.wrapping_sub(self.tcp_last_log_ms) >= 30_000 {
+                    self.tcp_last_log_ms = now;
+                    log::warn!("relay: TCP connect to {} failed: {e:?}", self.gcs_tcp);
+                }
             }
         }
     }
@@ -241,6 +294,20 @@ impl Platform {
         }
     }
 
+    /// Report a telemetry frame that could not be queued in full.
+    ///
+    /// The relay socket is non-blocking, so a full send buffer shows up as a
+    /// short write or a `WouldBlock`. That used to be swallowed as success,
+    /// which silently dropped telemetry - and the VPS relay drops a drone that
+    /// goes quiet for 15 s (see `udp_relay_vps.py`), so it must not go unnoticed.
+    fn note_short_tcp_write(&mut self, wrote: usize, total: usize) {
+        let now = self.now_ms();
+        if now.wrapping_sub(self.tcp_short_log_ms) >= 10_000 {
+            self.tcp_short_log_ms = now;
+            log::warn!("relay: queued only {wrote}/{total} bytes, telemetry dropped");
+        }
+    }
+
     /// Push the LED colour computed by the core.
     pub fn set_led(&mut self, out: flight_core::led::LedOut) {
         let r = ((out.color >> 16) & 0xFF) as u8;
@@ -248,13 +315,8 @@ impl Platform {
         let b = (out.color & 0xFF) as u8;
         // Scale by brightness (0..=255), exactly like setBrightness().
         let scale = |c: u8| ((c as u16 * out.brightness as u16) / 255) as u8;
-        let pixel = ws2812_esp32_rmt_driver::Pixel::new_with_gamma(
-            scale(r),
-            scale(g),
-            scale(b),
-            LED_VCC_GRB,
-        );
-        let _ = self.led.write_nocopy([pixel].into_iter());
+        // The on-board WS2812 on the DevKitC-1 is wired G-R-B.
+        let _ = self.led.write(&[scale(g), scale(r), scale(b)]);
     }
 }
 
@@ -269,17 +331,30 @@ impl Io for Platform {
     }
 
     fn tcp_send(&mut self, data: &[u8]) -> bool {
+        // The socket borrow must not overlap `self` mutations, so the outcome is
+        // collected first and only then acted on.
+        let mut short: Option<usize> = None;
+        let mut broken = false;
+
         match self.tcp.as_mut() {
-            Some(s) => match std::io::Write::write_all(s, data) {
-                Ok(()) => true,
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
-                Err(_) => {
-                    self.tcp = None;
-                    false
-                }
+            Some(s) => match std::io::Write::write(s, data) {
+                Ok(n) if n == data.len() => {}
+                Ok(n) => short = Some(n),
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => short = Some(0),
+                Err(_) => broken = true,
             },
-            None => false,
+            None => return false,
         }
+
+        if broken {
+            log::warn!("relay: TCP write failed, dropping the link");
+            self.tcp = None;
+            return false;
+        }
+        if let Some(n) = short {
+            self.note_short_tcp_write(n, data.len());
+        }
+        true
     }
 
     fn udp_send(&mut self, data: &[u8]) -> bool {
@@ -287,7 +362,21 @@ impl Io for Platform {
     }
 
     fn log(&mut self, line: &str) {
-        print!("{}", line);
+        // The console is meant to echo immediately (the original firmware used
+        // `Serial.print`, which is unbuffered). Rust's stdout is line buffered
+        // and `log` is called with fragments that carry no newline at all.
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let _ = out.write_all(line.as_bytes());
+        let _ = out.flush();
+        // `flush` only empties Rust's own buffer. On the USB Serial/JTAG
+        // console the bytes then sit in a hardware FIFO which is drained by the
+        // VFS `fsync` hook, so without this the output stays invisible until
+        // something else happens to push it out.
+        unsafe {
+            esp_idf_svc::sys::fsync(1);
+        }
     }
 
     fn save_config(&mut self, cfg: &Config) {
