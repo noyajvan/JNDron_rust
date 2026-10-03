@@ -64,6 +64,41 @@ impl Frame {
     }
 }
 
+/// MAVLink message id of `PARAM_REQUEST_LIST`.
+pub const PARAM_REQUEST_LIST_MSGID: u32 = 21;
+
+/// MAVLink message id of `PARAM_VALUE`.
+pub const PARAM_VALUE_MSGID: u32 = 22;
+
+/// Read `param_count` and `param_index` out of a raw `PARAM_VALUE` frame.
+///
+/// `PARAM_VALUE` is not in the schema, so it is relayed verbatim and its checksum
+/// cannot be recomputed here - but the bridge does need to follow a parameter
+/// download so it can tell a redundant request from a useful one. Wire layout,
+/// widest field first:
+///
+/// ```text
+///   float  param_value  (0..4)
+///   uint16 param_count  (4..6)
+///   uint16 param_index  (6..8)
+/// ```
+///
+/// Returns `None` for anything that is not a complete MAVLink 2 frame carrying
+/// both fields (MAVLink 2 truncates trailing zero bytes, so a short payload is
+/// legal and simply has no count or index to read).
+pub fn param_value_index(raw: &[u8]) -> Option<(u16, u16)> {
+    if raw.len() < 12 || raw[0] != STX_V2 {
+        return None;
+    }
+    let len = raw[1] as usize;
+    if len < 8 || raw.len() < 10 + len + 2 {
+        return None;
+    }
+    let count = u16::from_le_bytes([raw[14], raw[15]]);
+    let index = u16::from_le_bytes([raw[16], raw[17]]);
+    Some((count, index))
+}
+
 // ---------------------------------------------------------------------------
 // Payload writer / reader
 // ---------------------------------------------------------------------------
@@ -408,6 +443,27 @@ mod tests {
         assert!(!f.crc_checked, "unknown message must not claim a verified CRC");
         assert_eq!(f.msgid, 22);
         assert_eq!(f.relay_bytes(), wire, "must be forwarded byte for byte");
+    }
+
+    #[test]
+    fn param_value_index_reads_count_and_index() {
+        let mut w = Writer::new();
+        w.f32(1.5);   // param_value
+        w.u16(1129);  // param_count
+        w.u16(42);    // param_index
+        w.char_array("TEST_PARAM", 16);
+        w.u8(9);      // param_type
+        let payload = w.into_vec();
+        let bytes = encode_v2(1, 1, 1, 22, &payload, None);
+        assert_eq!(param_value_index(&bytes), Some((1129, 42)));
+
+        // MAVLink 2 truncates trailing zero bytes, so a payload may be too short to
+        // carry the index at all. That must not be mistaken for index zero.
+        let short = encode_v2(1, 1, 1, 22, &payload[..4], None);
+        assert_eq!(param_value_index(&short), None);
+
+        // Not a MAVLink 2 frame at all.
+        assert_eq!(param_value_index(&[0xFE, 9, 0, 0]), None);
     }
 
     #[test]

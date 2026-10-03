@@ -13,7 +13,18 @@ import struct
 import sys
 import time
 
-CRC_EXTRA = {0: 50, 20: 214, 21: 159, 22: 220, 30: 39, 74: 20, 253: 83, 193: 193}
+CRC_EXTRA = {
+    0: 50,      # HEARTBEAT
+    20: 214,    # PARAM_REQUEST_READ
+    21: 159,    # PARAM_REQUEST_LIST
+    22: 220,    # PARAM_VALUE
+    30: 39,     # ATTITUDE
+    43: 132,    # MISSION_REQUEST_LIST (mission_type is an extension, excluded)
+    66: 193,    # REQUEST_DATA_STREAM
+    74: 20,     # VFR_HUD
+    193: 82,    # SET_MESSAGE_INTERVAL
+    253: 83,    # STATUSTEXT
+}
 
 # Indices asked for individually, to test whether the parameter table itself is
 # reachable when the flight controller refuses to walk the whole list.
@@ -39,10 +50,27 @@ def frame(msgid, payload, seq, sysid=255, compid=190):
 
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
+    # Optional: ask the FC for ATTITUDE at 10 Hz, to test whether it applies
+    # SET_MESSAGE_INTERVAL at all (Mission Planner keeps re-sending those).
+    set_interval = "-set" in sys.argv
+    old_way = "-stream" in sys.argv
+    mission = "-mission" in sys.argv
+    relists = "-relists" in sys.argv
     s = socket.create_connection(("127.0.0.1", 14552), timeout=5)
     s.setblocking(False)
     s.sendall(frame(21, bytes([1, 1]), 0))
     print("sent PARAM_REQUEST_LIST")
+
+    if set_interval:
+        # SET_MESSAGE_INTERVAL(193): interval_us(u32) message_id(u16)
+        s.sendall(frame(193, struct.pack("<IH", 100_000, 30), 9))
+        print("sent SET_MESSAGE_INTERVAL(ATTITUDE, 10 Hz)")
+
+    if old_way:
+        # REQUEST_DATA_STREAM(66): req_message_rate(u16) target_system target_component
+        # req_stream_id start_stop - stream 0 is MAV_DATA_STREAM_ALL.
+        s.sendall(frame(66, struct.pack("<HBBBB", 10, 1, 1, 0, 1), 10))
+        print("sent REQUEST_DATA_STREAM(ALL, 10 Hz)")
 
     # PARAM_REQUEST_READ (20): param_index(i16) target_system target_component
     # param_id[16] - wire order puts param_index first, then the byte fields.
@@ -54,10 +82,22 @@ def main():
     sonde_sent = set()
     found = set()
 
+    # Mission requests are the other thing Mission Planner sends on connect, and the
+    # bridge itself asks for the mission periodically. ArduPilot serves one list at a
+    # time, so this tests whether the parameter walk survives them.
+    mission_next = time.time() + 3 if mission else None
+    mission_seq = 0
+
+    # Mission Planner re-sends PARAM_REQUEST_LIST while its dialog sees no progress.
+    # If a fresh request restarts the FC's walk, a slow walk can never finish.
+    relist_next = time.time() + 5 if relists else None
+    relist_seq = 20
+
     buf = bytearray()
     order = []
     seen = set()
     counts = {}
+    names = {}
     # (param_index, sequence) -> how many times that exact pair arrived. A pair
     # seen more than once means the path duplicated a frame; distinct sequences
     # for one index mean the flight controller really sent it again.
@@ -69,6 +109,15 @@ def main():
     last_new = time.time()
 
     while time.time() < deadline:
+        if relist_next is not None and time.time() >= relist_next:
+            relist_next = time.time() + 5
+            relist_seq = (relist_seq + 1) & 0xFF
+            s.sendall(frame(21, bytes([1, 1]), relist_seq))
+        if mission_next is not None and time.time() >= mission_next:
+            mission_next = time.time() + 3
+            mission_seq = (mission_seq + 1) & 0xFF
+            # MISSION_REQUEST_LIST(43): target_system target_component mission_type
+            s.sendall(frame(43, bytes([1, 1, 0]), mission_seq))
         for when, index in list(sonde_at.items()):
             if time.time() >= when:
                 s.sendall(read_index(index))
@@ -118,6 +167,8 @@ def main():
                 if idx not in seen:
                     seen.add(idx)
                     order.append(idx)
+                    names[idx] = (payload[8:24].split(b"\x00")[0].decode("ascii", "replace"),
+                                  struct.unpack("<f", payload[0:4])[0])
                     last_new = time.time()
             del buf[:total]
 
@@ -140,6 +191,17 @@ def main():
     print(" ".join(str(i) for i in order[:60]))
     print("messages seen (id: count):",
           ", ".join(f"{k}:{v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1])))
+    if set_interval or old_way:
+        rate = counts.get(30, 0) / max(seconds - 3, 1)
+        print(f"ATTITUDE rate after the request: {rate:.1f} frames/s "
+              f"(about 1 Hz means the FC did not raise the stream rate)")
+    interesting = sorted(
+        ((name, value) for name, value in names.values()
+         if name.startswith(("SR", "SERIAL", "MAV")) and name),
+    )
+    print(f"stream/port parameters seen ({len(interesting)}):")
+    for name, value in interesting:
+        print(f"   {name:<16} {value:g}")
     s.close()
 
 

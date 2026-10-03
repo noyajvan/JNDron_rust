@@ -11,9 +11,17 @@ use crate::crash::{CrashDetector, CrashInput};
 use crate::io::Io;
 use crate::led::{self, LedInput, LedOut};
 use crate::mavlink::{self, Frame, Parser};
+use crate::mavlink::frame::STX_V2;
 use crate::messages::{self, defs, Heartbeat, Message, Statustext};
 use crate::queues::TextRing;
 use crate::Config;
+
+/// How long a parameter walk may go without progress before it counts as stalled.
+///
+/// While a walk is progressing, `PARAM_REQUEST_LIST` from the ground station is held
+/// back (see `Bridge::feed_gcs_bytes`); after this long with no new parameter, the
+/// held request is replayed so a dead download can always be restarted.
+const PARAM_WALK_STALL_MS: u32 = 10_000;
 
 /// `static` locals of the state machine, lifted into the struct.
 #[derive(Debug, Clone)]
@@ -66,6 +74,22 @@ struct MavStatics {
     last_fail_fit: f32,
     last_fwd_fail_ms: u32,
     last_do_connect_msg: u32,
+
+    // --- parameter download tracking (see `feed_gcs_bytes`) ---
+    /// Highest parameter index seen in the walk in progress.
+    walk_max_index: u16,
+    /// Parameter count the flight controller reported, 0 before the first reply.
+    walk_count: u16,
+    /// When a parameter index last arrived.
+    walk_progress_ms: u32,
+    /// A `PARAM_REQUEST_LIST` held back while a walk was running, kept exactly as
+    /// the ground station sent it so it can be replayed with the same sysid/compid.
+    held_list_request: Option<Vec<u8>>,
+    /// Bytes of the ground station's stream not yet handed to the flight controller.
+    gcs_pending: Vec<u8>,
+    /// How many list requests were held back, and how many were passed on.
+    walk_held: u32,
+    walk_forwarded: u32,
 }
 
 impl Default for MavStatics {
@@ -77,6 +101,13 @@ impl Default for MavStatics {
             last_fail_fit: -1.0,
             last_fwd_fail_ms: 0,
             last_do_connect_msg: 0,
+            walk_max_index: 0,
+            walk_count: 0,
+            walk_progress_ms: 0,
+            held_list_request: None,
+            gcs_pending: Vec::new(),
+            walk_held: 0,
+            walk_forwarded: 0,
         }
     }
 }
@@ -576,6 +607,15 @@ impl Bridge {
         self.fc_bytes = self.fc_bytes.wrapping_add(data.len() as u32);
         for frame in frames {
             self.fc_msgs = self.fc_msgs.wrapping_add(1);
+            // Follow a parameter download: repeated requests from the ground station
+            // restart it, so knowing whether one is running decides whether a fresh
+            // request is worth forwarding (see `feed_gcs_bytes`).
+            if frame.msgid == crate::mavlink::frame::PARAM_VALUE_MSGID {
+                if let Some((count, index)) = crate::mavlink::frame::param_value_index(&frame.raw)
+                {
+                    self.note_param_progress(io.now_ms(), count, index);
+                }
+            }
             // Forward known messages re-encoded as MAVLink 2 (keeping the FC's
             // sysid/compid/seq); unknown ones go through verbatim, because their
             // checksum cannot be recomputed without knowing CRC_EXTRA.
@@ -590,6 +630,19 @@ impl Bridge {
     }
 
     /// Feed bytes received from the GCS (TCP or UDP).
+    ///
+    /// Everything reaches the flight controller exactly as it arrived, byte for
+    /// byte, with one exception: `PARAM_REQUEST_LIST` while a parameter walk is
+    /// already running.
+    ///
+    /// ArduPilot restarts its walk on every such request, and Mission Planner
+    /// re-sends the request while its dialog sees no progress. Measured against the
+    /// real vehicle with `gcs_probe.py`: one request downloaded all 1129
+    /// parameters, while a repeat every five seconds stalled the walk after about
+    /// fifty - which is precisely the "Getting params" hang, and it cannot finish
+    /// by itself. So a request that arrives mid-walk is held, and replayed
+    /// unchanged (same sysid/compid, so the FC keeps answering the real ground
+    /// station rather than the bridge) if the walk stalls.
     pub fn feed_gcs_bytes(&mut self, io: &mut dyn Io, data: &[u8]) {
         let now = io.now_ms();
         self.last_server_pkt_ms = now;
@@ -600,7 +653,95 @@ impl Bridge {
                 self.mav.last_do_connect_msg = now;
             }
         }
-        io.fc_write(data);
+
+        self.mav.gcs_pending.extend_from_slice(data);
+        loop {
+            if self.mav.gcs_pending.is_empty() {
+                break;
+            }
+            if self.mav.gcs_pending[0] != STX_V2 {
+                // Not a MAVLink 2 frame boundary: pass everything up to the next
+                // marker straight through (the relay's MAVLink 1 keep-alive frames,
+                // serial noise) without interpreting it.
+                let upto = self
+                    .mav
+                    .gcs_pending
+                    .iter()
+                    .position(|&b| b == STX_V2)
+                    .unwrap_or(self.mav.gcs_pending.len());
+                let passthrough = self.mav.gcs_pending[..upto].to_vec();
+                io.fc_write(&passthrough);
+                self.mav.gcs_pending.drain(..upto);
+                continue;
+            }
+            // MAVLink 2 header: FD, len, incompat, compat, seq, sysid, compid, msgid[3].
+            const HEADER: usize = 10;
+            if self.mav.gcs_pending.len() < HEADER {
+                break; // wait for the rest
+            }
+            let total = HEADER + self.mav.gcs_pending[1] as usize + 2;
+            if self.mav.gcs_pending.len() < total {
+                break; // wait for the rest
+            }
+            let msgid = (self.mav.gcs_pending[7] as u32)
+                | ((self.mav.gcs_pending[8] as u32) << 8)
+                | ((self.mav.gcs_pending[9] as u32) << 16);
+            let frame_bytes = self.mav.gcs_pending[..total].to_vec();
+            if msgid == crate::mavlink::frame::PARAM_REQUEST_LIST_MSGID
+                && !self.accept_list_request(now, &frame_bytes)
+            {
+                self.mav.gcs_pending.drain(..total);
+                continue;
+            }
+            io.fc_write(&frame_bytes);
+            self.mav.gcs_pending.drain(..total);
+        }
+        // A frame that never completes must not pile up for ever.
+        if self.mav.gcs_pending.len() > 512 {
+            let rest = std::mem::take(&mut self.mav.gcs_pending);
+            io.fc_write(&rest);
+        }
+    }
+
+    /// Record progress of the parameter download the flight controller is serving.
+    ///
+    /// A walk that starts over from a lower index counts as a fresh walk, which is
+    /// what happens when a request slipped through and the FC restarted.
+    fn note_param_progress(&mut self, now: u32, count: u16, index: u16) {
+        let walk = &mut self.mav;
+        if count > 0 {
+            walk.walk_count = count;
+        }
+        if index < walk.walk_max_index && walk.walk_count > 0 {
+            walk.walk_max_index = index;
+        } else if index > walk.walk_max_index {
+            walk.walk_max_index = index;
+        }
+        walk.walk_progress_ms = now;
+    }
+
+    /// Is the flight controller part-way through a parameter walk, and still moving?
+    fn param_walk_running(&self, now: u32) -> bool {
+        let walk = &self.mav;
+        walk.walk_count > 0
+            && walk.walk_max_index + 1 < walk.walk_count
+            && now.wrapping_sub(walk.walk_progress_ms) < PARAM_WALK_STALL_MS
+    }
+
+    /// Decide whether a `PARAM_REQUEST_LIST` from the ground station goes to the FC.
+    ///
+    /// Returns false when it was held instead. It is forwarded whenever no walk is
+    /// making progress, so a download that died can always be restarted.
+    fn accept_list_request(&mut self, now: u32, raw: &[u8]) -> bool {
+        if self.param_walk_running(now) {
+            self.mav.held_list_request = Some(raw.to_vec());
+            self.mav.walk_held = self.mav.walk_held.wrapping_add(1);
+            false
+        } else {
+            self.mav.held_list_request = None;
+            self.mav.walk_forwarded = self.mav.walk_forwarded.wrapping_add(1);
+            true
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -828,6 +969,26 @@ impl Bridge {
     /// One iteration of `loop()` minus the terminal and the LED push.
     pub fn tick(&mut self, io: &mut dyn Io) {
         let now = io.now_ms();
+
+        // A parameter download that stopped moving can always be restarted: replay
+        // the list request that was held back while it looked healthy, byte for byte,
+        // so the flight controller still sees the ground station's own sysid/compid.
+        if self.mav.held_list_request.is_some() {
+            let finished = self.mav.walk_count > 0
+                && self.mav.walk_max_index + 1 >= self.mav.walk_count;
+            let stalled = self.mav.walk_progress_ms == 0
+                || now.wrapping_sub(self.mav.walk_progress_ms) >= PARAM_WALK_STALL_MS;
+            if finished || stalled {
+                // Finished: nothing left to replay. Stalled: the download died and the
+                // ground station's request is the only way to start it again.
+                if let Some(raw) = self.mav.held_list_request.take() {
+                    if !finished {
+                        io.fc_write(&raw);
+                        self.mav.walk_forwarded = self.mav.walk_forwarded.wrapping_add(1);
+                    }
+                }
+            }
+        }
 
         if now.wrapping_sub(self.last_wifi_hb) >= 500 {
             self.send_heartbeat(io);

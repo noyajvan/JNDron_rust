@@ -234,6 +234,93 @@ fn gcs_bytes_are_forwarded_to_fc_and_mark_server() {
     assert!(b.has_server);
 }
 
+// ---------------------------------------------------------------------------
+// Parameter download: a list request must not restart a walk already in progress
+// ---------------------------------------------------------------------------
+
+/// `PARAM_VALUE` payload: value(f32), count(u16), index(u16), name[16], type(u8).
+fn param_value_payload(count: u16, index: u16) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.f32(1.0);
+    w.u16(count);
+    w.u16(index);
+    w.char_array("TEST_PARAM", 16);
+    w.u8(9);
+    w.into_vec()
+}
+
+#[test]
+fn param_request_is_forwarded_when_no_walk_is_running() {
+    let (mut b, mut io) = booted();
+    io.take_fc();
+    let request = frame(21, &[1, 1]);
+    b.feed_gcs_bytes(&mut io, &request);
+    assert_eq!(io.take_fc(), request);
+}
+
+#[test]
+fn param_request_is_held_while_the_walk_is_running() {
+    let (mut b, mut io) = booted();
+    // The flight controller is part-way through a walk of 1129 parameters.
+    b.feed_fc_bytes(&mut io, &frame(22, &param_value_payload(1129, 40)));
+    io.take_fc();
+    io.take_net();
+
+    b.feed_gcs_bytes(&mut io, &frame(21, &[1, 1]));
+
+    assert!(
+        io.take_fc().is_empty(),
+        "a list request arriving mid-walk would restart the download"
+    );
+}
+
+#[test]
+fn held_param_request_is_replayed_when_the_walk_stalls() {
+    let (mut b, mut io) = booted();
+    b.feed_fc_bytes(&mut io, &frame(22, &param_value_payload(1129, 40)));
+    io.take_fc();
+
+    let request = frame(21, &[1, 1]);
+    b.feed_gcs_bytes(&mut io, &request);
+    assert!(io.take_fc().is_empty());
+
+    // The walk goes quiet. The held request has to go out unchanged, otherwise a
+    // download that died could never be restarted. (`tick` also sends its own
+    // heartbeat, so look for the request among what was written.)
+    io.now += PARAM_WALK_STALL_MS + 1;
+    b.tick(&mut io);
+    let written = io.take_fc();
+    assert!(
+        written.windows(request.len()).any(|w| w == request.as_slice()),
+        "held request was not replayed"
+    );
+}
+
+#[test]
+fn param_request_is_forwarded_again_once_the_walk_completed() {
+    let (mut b, mut io) = booted();
+    b.feed_fc_bytes(&mut io, &frame(22, &param_value_payload(50, 49)));
+    io.take_fc();
+
+    let request = frame(21, &[1, 1]);
+    b.feed_gcs_bytes(&mut io, &request);
+    assert_eq!(io.take_fc(), request);
+}
+
+#[test]
+fn gcs_stream_is_reassembled_across_reads() {
+    let (mut b, mut io) = booted();
+    io.take_fc();
+    let request = frame(21, &[1, 1]);
+
+    // A frame split over two reads must not be forwarded twice or damaged.
+    let (head, tail) = request.split_at(7);
+    b.feed_gcs_bytes(&mut io, head);
+    assert!(io.take_fc().is_empty(), "half a frame is not forwarded");
+    b.feed_gcs_bytes(&mut io, tail);
+    assert_eq!(io.take_fc(), request);
+}
+
 #[test]
 fn mavlink1_frames_are_ignored_by_the_v2_only_parser() {
     let (mut b, mut io) = booted();
