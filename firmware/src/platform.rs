@@ -98,9 +98,13 @@ impl Platform {
         // associated with. That stale profile survives reflashes, credential
         // changes and reboots alike, so once the hotspot was recreated with a
         // new BSSID every association timed out on the auth step (`auth -> init`
-        // after exactly one second) instead of using the AP found by a fresh
-        // scan. Drop it, and keep driver state in RAM from now on: the
-        // credentials that matter live in our own NVS namespace above.
+        // after exactly one second).
+        //
+        // This is *only* about the driver's private copy. The network that is
+        // actually joined is the one configured in `wifi_activate`, i.e. the
+        // SSID and password held in our own NVS namespace (default `LEO` /
+        // `88888888` from `consts`, changeable with `SSID=` / `PASS=` / `SAVE`).
+        // There is no network selection by scanning anywhere in the firmware.
         unsafe {
             let restored = esp_idf_svc::sys::esp_wifi_restore();
             let storage = esp_idf_svc::sys::esp_wifi_set_storage(
@@ -399,6 +403,9 @@ impl Io for Platform {
     }
 
     fn wifi_activate(&mut self, cfg: &Config) {
+        // The joined network is exactly the configured one: no scan-based
+        // selection and no driver-side profile (see `Platform::new`).
+        log::info!("wifi: joining configured network '{}'", cfg.sta_ssid);
         let conf = Configuration::Client(ClientConfiguration {
             ssid: cfg.sta_ssid.as_str().try_into().unwrap_or_default(),
             password: cfg.sta_pass.as_str().try_into().unwrap_or_default(),
