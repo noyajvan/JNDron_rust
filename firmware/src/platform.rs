@@ -482,6 +482,42 @@ impl Io for Platform {
         self.wifi.is_connected().unwrap_or(false)
     }
 
+    fn local_ip(&self) -> String {
+        // The station interface's address, or "0.0.0.0" while DHCP has not delivered
+        // one. The bridge treats that as a failed connection (see `Bridge::tick`),
+        // because the driver reports "connected" either way and every relay attempt
+        // then fails with "host unreachable".
+        //
+        // Done through the C API rather than `EspWifi::sta_netif()`: that would need a
+        // mutable borrow for a read-only question.
+        unsafe {
+            let handle =
+                esp_idf_svc::sys::esp_netif_get_handle_from_ifkey(c"WIFI_STA_DEF".as_ptr());
+            if !handle.is_null() {
+                let mut info = esp_idf_svc::sys::esp_netif_ip_info_t::default();
+                if esp_idf_svc::sys::esp_netif_get_ip_info(handle, &mut info)
+                    == esp_idf_svc::sys::ESP_OK
+                    && info.ip.addr != 0
+                {
+                    let o = info.ip.addr.to_le_bytes();
+                    return format!("{}.{}.{}.{}", o[0], o[1], o[2], o[3]);
+                }
+            }
+        }
+        "0.0.0.0".to_string()
+    }
+
+    fn rssi_dbm(&self) -> i32 {
+        // What the driver sees for the access point we are associated with.
+        let mut ap: esp_idf_svc::sys::wifi_ap_record_t = unsafe { core::mem::zeroed() };
+        let err = unsafe { esp_idf_svc::sys::esp_wifi_sta_get_ap_info(&mut ap) };
+        if err == esp_idf_svc::sys::ESP_OK {
+            ap.rssi as i32
+        } else {
+            0
+        }
+    }
+
     fn tcp_connected(&self) -> bool {
         self.tcp.is_some()
     }

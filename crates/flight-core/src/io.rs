@@ -114,6 +114,9 @@ impl Io for NullIo {
 #[derive(Debug, Default)]
 pub struct MockIo {
     pub now: u32,
+    /// Address reported by `local_ip`. Empty means "no address yet", the state a
+    /// station is in after a reconnect whose DHCP never completed.
+    pub ip: String,
     pub fc_out: Vec<u8>,
     pub tcp_out: Vec<u8>,
     pub udp_out: Vec<u8>,

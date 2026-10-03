@@ -90,6 +90,8 @@ struct MavStatics {
     /// How many list requests were held back, and how many were passed on.
     walk_held: u32,
     walk_forwarded: u32,
+    /// When the station became associated without an address (0 = not in that state).
+    no_ip_since_ms: u32,
 }
 
 impl Default for MavStatics {
@@ -108,6 +110,7 @@ impl Default for MavStatics {
             gcs_pending: Vec::new(),
             walk_held: 0,
             walk_forwarded: 0,
+            no_ip_since_ms: 0,
         }
     }
 }
@@ -969,6 +972,28 @@ impl Bridge {
     /// One iteration of `loop()` minus the terminal and the LED push.
     pub fn tick(&mut self, io: &mut dyn Io) {
         let now = io.now_ms();
+
+        // Associated but without an address is a dead end the Wi-Fi driver does not
+        // report: after a reconnect DHCP can fail while the station still looks
+        // connected. Every relay connection then fails with "host unreachable" and
+        // the uplink goes quiet until the VPS relay drops us (it gives up after 15
+        // seconds of silence - measured), which is what a ground station sees as the
+        // link hanging. The Wi-Fi watchdog above cannot see it, because it only looks
+        // at the driver's "connected" flag, so treat it as a Wi-Fi failure here.
+        let ip = io.local_ip();
+        let no_address = ip.is_empty() || ip == "0.0.0.0";
+        if self.wifi_on && io.wifi_connected() && no_address {
+            if self.mav.no_ip_since_ms == 0 {
+                self.mav.no_ip_since_ms = now;
+            } else if now.wrapping_sub(self.mav.no_ip_since_ms) >= 10_000 {
+                self.mav.no_ip_since_ms = 0;
+                self.queue_statustext("WiFi up without an address, restarting");
+                let cfg = self.cfg.clone();
+                io.wifi_full_restart(&cfg);
+            }
+        } else {
+            self.mav.no_ip_since_ms = 0;
+        }
 
         // A parameter download that stopped moving can always be restarted: replay
         // the list request that was held back while it looked healthy, byte for byte,

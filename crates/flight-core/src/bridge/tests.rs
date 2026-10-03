@@ -117,6 +117,7 @@ fn booted() -> (Bridge, MockIo) {
     io.now = 1_000;
     io.connected = true;
     io.tcp = true;
+    io.ip = "10.0.0.2".into();
     let cfg = Config {
         sta_ssid: "LEO".into(),
         sta_pass: "88888888".into(),
@@ -125,6 +126,20 @@ fn booted() -> (Bridge, MockIo) {
     let mut b = Bridge::new(cfg);
     b.boot(&mut io);
     (b, io)
+}
+
+#[test]
+fn associated_without_an_address_restarts_wifi() {
+    let (mut b, mut io) = booted();
+    // Associated, but DHCP never delivered an address: the relay is unreachable and
+    // no other watchdog notices.
+    io.ip = "0.0.0.0".into();
+    b.tick(&mut io);
+    assert_eq!(io.full_restarts, 0, "not immediately, the address may still arrive");
+
+    io.now += 10_001;
+    b.tick(&mut io);
+    assert_eq!(io.full_restarts, 1, "a station without an address must be restarted");
 }
 
 // ---------------------------------------------------------------------------
