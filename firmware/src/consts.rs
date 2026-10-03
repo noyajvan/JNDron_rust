@@ -24,6 +24,19 @@ pub const DEFAULT_PASS: &str = "88888888";
 
 /// NVS namespace holding the Wi-Fi credentials (matches the C++ firmware).
 pub const NVS_NAMESPACE: &str = "dbridge";
+
+/// Bytes held back when the relay socket cannot take them immediately.
+///
+/// A parameter download arrives as one long burst (ArduPilot sends a list of
+/// 1129 parameters, about 42 KiB, on request) and that does not fit in a socket
+/// send buffer. Queuing it here instead of dropping it is what makes Mission
+/// Planner's "Getting params" finish.
+pub const TCP_TX_QUEUE: usize = 64 * 1024;
+
+/// Stop reading the flight controller once this much is queued towards the
+/// relay. The FC's own UART buffer then provides the backpressure and ArduPilot
+/// paces its output, instead of the bridge silently dropping frames.
+pub const TCP_TX_HIGH_WATER: usize = 48 * 1024;
 // Flight-controller UART pins on the ESP32-S3-DevKitC-1: TX = GPIO43,
 // RX = GPIO44. They are wired directly in `Platform::new`, because the HAL
 // needs the concrete pin singletons rather than a number.

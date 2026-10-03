@@ -20,6 +20,7 @@
 //! is the layer where API drift shows up, by design.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use esp_idf_hal::gpio::AnyIOPin;
@@ -53,8 +54,17 @@ pub struct Platform {
     tcp_was_up: bool,
     /// Rate limit for the "TCP connect failed" log line.
     tcp_last_log_ms: u32,
-    /// Rate limit for the "only part of the frame was queued" log line.
-    tcp_short_log_ms: u32,
+    /// Bytes read from the flight controller but not yet accepted by the relay
+    /// socket, in order. Without this the bridge dropped whatever did not fit
+    /// the socket buffer, which measured at roughly 60% of the telemetry - and
+    /// a parameter download needs the whole list, not 40% of it.
+    tx_queue: VecDeque<u8>,
+    /// Total bytes dropped because the queue overflowed (should stay 0).
+    tx_dropped: u64,
+    /// Rate limit for the "send queue full" log line.
+    tx_last_drop_log_ms: u32,
+    /// Rate limit for the "paused the FC link" log line.
+    tx_last_pause_log_ms: u32,
 }
 
 impl Platform {
@@ -142,7 +152,10 @@ impl Platform {
             tcp_last_try_ms: 0,
             tcp_was_up: false,
             tcp_last_log_ms: 0,
-            tcp_short_log_ms: 0,
+            tx_queue: VecDeque::new(),
+            tx_dropped: 0,
+            tx_last_drop_log_ms: 0,
+            tx_last_pause_log_ms: 0,
         })
     }
 
@@ -212,6 +225,11 @@ impl Platform {
     /// Maintain the outgoing TCP relay link to the VPS (mirrors
     /// `tcpLinkService()`).
     pub fn service_tcp(&mut self) {
+        if self.tcp.is_none() && !self.tx_queue.is_empty() {
+            // The link went away (dropped, failed or Wi-Fi down): telemetry queued
+            // for it is stale, and a fresh socket must not start with old frames.
+            self.tx_queue.clear();
+        }
         if !self.wifi_on || !self.wifi_connected() {
             if self.tcp_was_up {
                 self.tcp_was_up = false;
@@ -221,6 +239,7 @@ impl Platform {
         }
         if self.tcp.is_some() {
             self.tcp_was_up = true;
+            self.flush_tx();
             return;
         }
         self.tcp_was_up = false;
@@ -283,6 +302,21 @@ impl Platform {
     /// Read the flight controller's UART and push it into the bridge (mirrors
     /// `bridgeFCtoWiFi()`).
     pub fn pump_fc(&mut self, bridge: &mut flight_core::Bridge) {
+        // Backpressure instead of loss: while a lot is still queued towards the
+        // relay, stop reading the flight controller. Its own UART buffer then
+        // fills and ArduPilot paces its output, which is exactly what MAVLink
+        // expects, where dropping frames is not.
+        if self.tx_queue.len() >= crate::consts::TCP_TX_HIGH_WATER {
+            let now = self.now_ms();
+            if now.wrapping_sub(self.tx_last_pause_log_ms) >= 10_000 {
+                self.tx_last_pause_log_ms = now;
+                log::warn!(
+                    "relay: {} bytes queued, pausing the FC link until the 4G link drains",
+                    self.tx_queue.len()
+                );
+            }
+            return;
+        }
         let mut buf = [0u8; flight_core::consts::BRIDGE_BUF_SIZE];
         let mut total = 0usize;
         // Cap the work per loop iteration, like the C++ `for (pass < 16)`.
@@ -298,17 +332,60 @@ impl Platform {
         }
     }
 
-    /// Report a telemetry frame that could not be queued in full.
+    /// Append to the pending send queue, counting anything that does not fit.
     ///
-    /// The relay socket is non-blocking, so a full send buffer shows up as a
-    /// short write or a `WouldBlock`. That used to be swallowed as success,
-    /// which silently dropped telemetry - and the VPS relay drops a drone that
-    /// goes quiet for 15 s (see `udp_relay_vps.py`), so it must not go unnoticed.
-    fn note_short_tcp_write(&mut self, wrote: usize, total: usize) {
-        let now = self.now_ms();
-        if now.wrapping_sub(self.tcp_short_log_ms) >= 10_000 {
-            self.tcp_short_log_ms = now;
-            log::warn!("relay: queued only {wrote}/{total} bytes, telemetry dropped");
+    /// The relay socket is non-blocking, so a burst (a parameter list is about
+    /// 42 KiB) can arrive faster than the socket accepts it. Those bytes are
+    /// kept, not thrown away: measurement showed dropping them cost roughly 60%
+    /// of the telemetry and made Mission Planner's parameter download
+    /// impossible, since it needs the whole list.
+    fn queue_tx(&mut self, data: &[u8]) {
+        let room = crate::consts::TCP_TX_QUEUE.saturating_sub(self.tx_queue.len());
+        let take = room.min(data.len());
+        self.tx_queue.extend(data[..take].iter().copied());
+        let dropped = data.len() - take;
+        if dropped > 0 {
+            self.tx_dropped += dropped as u64;
+            let now = self.now_ms();
+            if now.wrapping_sub(self.tx_last_drop_log_ms) >= 10_000 {
+                self.tx_last_drop_log_ms = now;
+                log::warn!(
+                    "relay: send queue full, dropped {dropped} bytes ({} in total)",
+                    self.tx_dropped
+                );
+            }
+        }
+    }
+
+    /// Push as much of the pending queue into the relay socket as it will take.
+    fn flush_tx(&mut self) {
+        let mut broken = false;
+        while !self.tx_queue.is_empty() {
+            if self.tx_queue.as_slices().0.is_empty() {
+                // Wrapped ring: make it contiguous before writing from the front.
+                self.tx_queue.make_contiguous();
+            }
+            let (front, _) = self.tx_queue.as_slices();
+            let sent = match self.tcp.as_mut() {
+                Some(s) => match std::io::Write::write(s, front) {
+                    Ok(n) => n,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => {
+                        broken = true;
+                        break;
+                    }
+                },
+                None => break,
+            };
+            if sent == 0 {
+                break;
+            }
+            self.tx_queue.drain(..sent);
+        }
+        if broken {
+            log::warn!("relay: TCP write failed while flushing, dropping the link");
+            self.tcp = None;
+            self.tx_queue.clear();
         }
     }
 
@@ -335,28 +412,35 @@ impl Io for Platform {
     }
 
     fn tcp_send(&mut self, data: &[u8]) -> bool {
-        // The socket borrow must not overlap `self` mutations, so the outcome is
-        // collected first and only then acted on.
-        let mut short: Option<usize> = None;
-        let mut broken = false;
+        if self.tcp.is_none() {
+            return false;
+        }
 
-        match self.tcp.as_mut() {
-            Some(s) => match std::io::Write::write(s, data) {
-                Ok(n) if n == data.len() => {}
-                Ok(n) => short = Some(n),
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => short = Some(0),
+        // Anything already queued must go first, otherwise frames would be sent
+        // out of order. MAVLink tolerates a gap, not reordering.
+        if !self.tx_queue.is_empty() {
+            self.queue_tx(data);
+            return true;
+        }
+
+        let mut written = 0usize;
+        let mut broken = false;
+        if let Some(s) = self.tcp.as_mut() {
+            match std::io::Write::write(s, data) {
+                Ok(n) => written = n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => written = 0,
                 Err(_) => broken = true,
-            },
-            None => return false,
+            }
         }
 
         if broken {
             log::warn!("relay: TCP write failed, dropping the link");
             self.tcp = None;
+            self.tx_queue.clear();
             return false;
         }
-        if let Some(n) = short {
-            self.note_short_tcp_write(n, data.len());
+        if written < data.len() {
+            self.queue_tx(&data[written..]);
         }
         true
     }
